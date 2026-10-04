@@ -14,7 +14,7 @@ static void idf_free(void *ptr, void *ctx) {
 }
 void app_main(void) {
     fht sensors;
-    fht_config config = fht_config_default(fht_hash_string, fht_equal_string);
+    fht_config config = FHT_CONFIG_DEFAULT(FHT_HASH_STRING, FHT_EQUAL_STRING);
     char key[] = "temperature";
     int temperature = 25;
     void *value = NULL;
@@ -22,16 +22,16 @@ void app_main(void) {
     config.alloc = idf_malloc;
     config.free = idf_free;
     /* Borrowed key/value; they must outlive their entries. */
-    status = fht_init(&sensors, &config);
+    status = FHT_INIT(&sensors, &config);
     if (status != FHT_OK) return;
     /* Preallocate buckets. Nodes still use the custom allocator per insert. */
-    status = fht_reserve(&sensors, 16);
+    status = FHT_RESERVE(&sensors, 16);
     if (status != FHT_OK) goto done;
-    status = fht_put(&sensors, key, &temperature);
+    status = FHT_PUT(&sensors, key, &temperature);
     if (status != FHT_ADDED) goto done;
-    if (fht_get(&sensors, "temperature", &value))
+    if (FHT_GET(&sensors, "temperature", &value))
         ESP_LOGI("fht", "temperature=%d", *(int *)value);
 done:
     if (status < 0) ESP_LOGE("fht", "Operation failed: %d", (int)status);
-    (void)fht_destroy(&sensors);
+    (void)FHT_DESTROY(&sensors);
 }

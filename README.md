@@ -4,6 +4,7 @@
 
 纯 C99，无外部依赖，无内置锁。只需复制 `include/fht.h`，所有函数均为
 `static inline`，可在多个 C 编译单元中包含，不需要单独编译库。
+对外通过 `FHT_*` 宏调用，具体实现使用 `fht_*_impl` 内联函数。
 
 参考 Redis dict 的链式冲突处理和双表渐进式 rehash，自行实现，并非移植
 Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象释放回调。
@@ -32,19 +33,19 @@ Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象释�
 
 void example(void) {
     fht h;
-    fht_config c = fht_config_default(fht_hash_string, fht_equal_string);
+    fht_config c = FHT_CONFIG_DEFAULT(FHT_HASH_STRING, FHT_EQUAL_STRING);
     char key[] = "temperature";
     int temperature = 25;
     void *value;
 
-    if (fht_init(&h, &c) != FHT_OK) return;
-    if (fht_put(&h, key, &temperature) == FHT_ADDED) {
-        if (fht_get(&h, "temperature", &value)) {
+    if (FHT_INIT(&h, &c) != FHT_OK) return;
+    if (FHT_PUT(&h, key, &temperature) == FHT_ADDED) {
+        if (FHT_GET(&h, "temperature", &value)) {
             int current = *(int *)value;
             (void)current;
         }
     }
-    fht_destroy(&h);
+    FHT_DESTROY(&h);
 }
 ```
 
@@ -66,7 +67,7 @@ static void my_free(void *ptr, void *ctx) {
 }
 
 /* 在包含 FreeRTOS.h 后使用 */
-fht_config c = fht_config_default(fht_hash_string, fht_equal_string);
+fht_config c = FHT_CONFIG_DEFAULT(FHT_HASH_STRING, FHT_EQUAL_STRING);
 c.alloc = my_malloc;
 c.free = my_free;
 c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
@@ -78,22 +79,37 @@ c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
 若 key/value 也由用户分配，可配置 `destroy_key/destroy_value` 回收它们。
 ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
 
+## 宏接口
+
+所有操作统一通过 `FHT_INIT`、`FHT_PUT`、`FHT_GET` 等宏调用，宏只转发到
+类型明确的 `static inline` 实现。每个参数在展开式中仅出现一次，允许使用
+`ptr++` 等带副作用的表达式；不同参数之间的求值顺序仍遵循 C 函数调用规则，
+不要在不同参数中同时修改同一个变量。返回值和原有 API 保持一致。
+
+`FHT_HASH_STRING`、`FHT_EQUAL_STRING` 使用对象式宏，可直接作为函数指针
+传入配置，也可以直接调用。操作宏本身不能取函数地址；需要回调的 API
+继续通过配置结构中的函数指针提供，不依赖操作宏。
+
+旧版 `fht_init(...)` 等调用形式保留为兼容宏。实现函数 `fht_*_impl` 和
+数据结构的内部字段不作为稳定接口，应用应使用公开宏。
+宏包装不增加运行时分配，也不改变节点或表对象的内存布局。
+
 ## API 与所有权
 
 | API | 行为 |
 | --- | --- |
-| `fht_init` | 初始化未初始化或已销毁对象；不分配内存 |
-| `fht_put` | 新增返回 `FHT_ADDED`；相同键替换返回 `FHT_REPLACED` |
-| `fht_get` | 找到返回 1，未找到返回 0；输出借用的 value |
-| `fht_remove` | 删除并调用配置的对象析构回调 |
-| `fht_take` | 删除但不析构，将 key/value 所有权交给调用方 |
-| `fht_reserve` | 请求桶容量；正在迁移且请求更大容量时返回 `FHT_BUSY` |
-| `fht_rehash_step` | 手动迁移，返回消耗的工作单元数 |
-| `fht_foreach` | 遍历两个表；回调返回非零时停止 |
-| `fht_size / fht_capacity` | 条目数 / 目标表桶数 |
-| `fht_is_rehashing` | 是否处于双表迁移状态 |
-| `fht_clear` | 释放全部存储，保留配置，可继续插入 |
-| `fht_destroy` | 释放并清零；再次使用前需要 init |
+| `FHT_INIT` | 初始化未初始化或已销毁对象；不分配内存 |
+| `FHT_PUT` | 新增返回 `FHT_ADDED`；相同键替换返回 `FHT_REPLACED` |
+| `FHT_GET` | 找到返回 1，未找到返回 0；输出借用的 value |
+| `FHT_REMOVE` | 删除并调用配置的对象析构回调 |
+| `FHT_TAKE` | 删除但不析构，将 key/value 所有权交给调用方 |
+| `FHT_RESERVE` | 请求桶容量；正在迁移且请求更大容量时返回 `FHT_BUSY` |
+| `FHT_REHASH_STEP` | 手动迁移，返回消耗的工作单元数 |
+| `FHT_FOREACH` | 遍历两个表；回调返回非零时停止 |
+| `FHT_SIZE / FHT_CAPACITY` | 条目数 / 目标表桶数 |
+| `FHT_IS_REHASHING` | 是否处于双表迁移状态 |
+| `FHT_CLEAR` | 释放全部存储，保留配置，可继续插入 |
+| `FHT_DESTROY` | 释放并清零；再次使用前需要 init |
 
 配置析构回调后，成功 put 的 key/value 由表负责释放；失败仍由调用方负责。
 替换时同时采用新的 key 和 value，释放原来的对象；对应指针未变则不释放。
@@ -111,7 +127,7 @@ ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
 迁移节点会重新调用 hash 回调，这是用计算量换取更小节点内存的选择。
 
 可设置 `c.rehash_work = 0` 关闭自动推进，随后在任务合适的位置调用
-`fht_rehash_step(&h, budget)`。设置预算只是限制迁移工作量，不是硬实时保证：
+`FHT_REHASH_STEP(&h, budget)`。设置预算只是限制迁移工作量，不是硬实时保证：
 新桶数组的分配/清零是同步的，查询可能遍历长链，回调和分配器耗时也不受限制。
 哈希函数应满足“比较相等的键具有相同哈希值”。默认字符串 FNV-1a 适合可信键；
 面对外部恶意输入，应使用带密钥的哈希，例如 SipHash。

@@ -1,10 +1,12 @@
 # rtos-hashtable
 
-面向 ESP32 / FreeRTOS 的 header-only 哈希表（fht）。
+面向 ESP32 / FreeRTOS 的 header-only 字典（dict）。字典底层持有两张 hashtable，参考 Redis dict 的双表渐进式 rehash 设计。
+正常情况下只使用 `tables[0]`；扩容时分配 `tables[1]` 的桶数组，逐步迁移节点。
+查找和删除检查两张表，新条目进入新表。迁移完成后释放旧桶并切换回单表。
 
-纯 C99，无外部依赖，无内置锁。只需复制 `include/fht.h`，所有函数均为
+纯 C99，无外部依赖，无内置锁。只需复制 `include/dict.h`，所有函数均为
 `static inline`，可在多个 C 编译单元中包含，不需要单独编译库。
-对外通过 `FHT_*` 宏调用，具体实现使用 `fht_*_impl` 内联函数。
+对外通过 `DICT_*` 宏调用，具体实现使用 `dict_*_impl` 内联函数。
 
 参考 Redis dict 的链式冲突处理和双表渐进式 rehash，自行实现，并非移植
 Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象释放回调。
@@ -14,8 +16,8 @@ Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象释�
 节点只存三个指针：`next / key / value`，不缓存 hash，不复制 key/value。
 在常见 ESP32 32 位 ABI 下，节点为 **12 字节**，每个桶 **4 字节**，
 表对象约 **64 字节**。上述数字按类型布局计算，未在 ESP32 设备上实测；
-不包含分配器的块头、对齐浪费和用户对象。可用 `sizeof(fht_entry)`、
-`sizeof(fht)` 在实际编译目标上确认。
+不包含分配器的块头、对齐浪费和用户对象。可用 `sizeof(dict_entry)`、
+`sizeof(dict)` 在实际编译目标上确认。
 
 正常运行时，表自身占用约为 `64 + 12 × 节点数 + 4 × 桶数` 字节。
 例如 100 条记录、128 个桶约 1776 字节。rehash 期间同时保留旧、新桶数组，
@@ -29,23 +31,23 @@ Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象释�
 ## 最小用法
 
 ```c
-#include "fht.h"
+#include "dict.h"
 
 void example(void) {
-    fht h;
-    fht_config c = FHT_CONFIG_DEFAULT(FHT_HASH_STRING, FHT_EQUAL_STRING);
+    dict h;
+    dict_config c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
     char key[] = "temperature";
     int temperature = 25;
     void *value;
 
-    if (FHT_INIT(&h, &c) != FHT_OK) return;
-    if (FHT_PUT(&h, key, &temperature) == FHT_ADDED) {
-        if (FHT_GET(&h, "temperature", &value)) {
+    if (DICT_INIT(&h, &c) != DICT_OK) return;
+    if (DICT_PUT(&h, key, &temperature) == DICT_ADDED) {
+        if (DICT_GET(&h, "temperature", &value)) {
             int current = *(int *)value;
             (void)current;
         }
     }
-    FHT_DESTROY(&h);
+    DICT_DESTROY(&h);
 }
 ```
 
@@ -67,7 +69,7 @@ static void my_free(void *ptr, void *ctx) {
 }
 
 /* 在包含 FreeRTOS.h 后使用 */
-fht_config c = FHT_CONFIG_DEFAULT(FHT_HASH_STRING, FHT_EQUAL_STRING);
+dict_config c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
 c.alloc = my_malloc;
 c.free = my_free;
 c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
@@ -79,37 +81,102 @@ c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
 若 key/value 也由用户分配，可配置 `destroy_key/destroy_value` 回收它们。
 ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
 
+## 全局内存统计（可关闭）
+
+默认 `DICT_ENABLE_MEMORY_STATS=0`，不创建全局统计对象，也不执行统计更新。
+需要统计时，给项目中**所有包含 dict.h 的编译单元**统一添加
+`-DDICT_ENABLE_MEMORY_STATS=1`。这是项目级编译开关，不是运行时开关；
+不同编译单元混用 0/1 会遗漏分配或释放，导致统计错误。
+
+打开后，在**恰好一个** `.c` 文件中定义统计对象：
+
+```c
+/* 项目所有编译单元已经统一设置 DICT_ENABLE_MEMORY_STATS=1 */
+#define DICT_MEMORY_STATS_IMPLEMENTATION
+#include "dict.h"
+```
+
+其他文件正常包含 `dict.h` 即可。所有表、所有编译单元共用一个统计对象，
+不是在头文件中为每个文件创建 static 计数器。无需增加单独的库源文件。
+关闭统计时，不需要上述实现定义；查询仍可调用，返回全零。
+
+```c
+dict_memory_stats stats = DICT_MEMORY_STATS_GET();
+/* stats.live_bytes: 尚未释放的请求字节数
+ * stats.live_blocks: 尚未释放的分配块数
+ * stats.peak_bytes:  历史最高请求字节数 */
+```
+
+统计覆盖默认和自定义 `alloc/free` 分配的**节点、桶数组**，包括 rehash
+期间的新旧桶数组和 OOM 回滚释放。内部释放路径已知对应分配的大小，
+因此无需给每块内存加统计头，也不改变自定义分配器收到的大小和指针。
+节点/表结构布局保持不变。统计不是实际堆占用：不包含 allocator 元数据、
+对齐开销、栈或静态的 `dict` 对象、调用方分配的 key/value，以及内存池预留空间。
+析构回调释放的 key/value 也不进入这组计数，需由调用方另行检查。
+
+成功 `DICT_CLEAR` 或 `DICT_DESTROY` 会扣除该表的所有内部存储，但只有
+**所有表**清理完毕，全局 `live_bytes/live_blocks` 才都应为 0。
+仅 remove/take 全部条目仍保留桶数组；返回 `DICT_BUSY` 的清理不会释放存储。
+`peak_bytes` 是历史值，不随释放归零。需要重新开始测量峰值时调用
+`DICT_MEMORY_STATS_RESET()`；仍有未释放块时返回 `DICT_BUSY`，禁止直接清零
+来掩盖泄漏。请在任务停止操作后检查全局归零或重置。
+
+### 多任务共享统计
+
+默认统计也不内置锁。即使不同任务操作不同的表，全局计数仍是共享数据。
+多任务使用时，在每个编译单元包含 `dict.h` 前，通过统一配置头定义
+`DICT_MEMORY_STATS_LOCK()` 和 `DICT_MEMORY_STATS_UNLOCK()`，它们必须使用
+同一把锁，保护统计更新、读取和重置。不允许只定义其中一个。
+分配/释放回调在统计锁外执行；快照用于已完成操作的诊断，不是底层堆的
+事务快照，并发进行中的分配/释放可能暂未反映出来。
+
+ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`，
+仅把短小的计数更新或快照放入临界区。所有使用表的文件必须先包含这个配置头。
+`examples/esp_idf.c` 给出唯一统计对象和 spinlock 定义，默认打开统计；
+添加项目级 `DICT_ENABLE_MEMORY_STATS=0` 可关闭。
+**统计锁不会保护表操作**；同一表的多个任务仍需外部 mutex 或单任务串行化。
+这也不提供 ISR 支持，表 API 仍只用于任务上下文。
+
+统计归零是内存泄漏检查的必要条件，不是对越界、重复释放、悬空指针或
+用户对象泄漏的完整证明，建议结合 heap integrity / heap tracing。
+
 ## 宏接口
 
-所有操作统一通过 `FHT_INIT`、`FHT_PUT`、`FHT_GET` 等宏调用，宏只转发到
+所有操作统一通过 `DICT_INIT`、`DICT_PUT`、`DICT_GET` 等宏调用，宏只转发到
 类型明确的 `static inline` 实现。每个参数在展开式中仅出现一次，允许使用
 `ptr++` 等带副作用的表达式；不同参数之间的求值顺序仍遵循 C 函数调用规则，
 不要在不同参数中同时修改同一个变量。返回值和原有 API 保持一致。
 
-`FHT_HASH_STRING`、`FHT_EQUAL_STRING` 使用对象式宏，可直接作为函数指针
+`DICT_HASH_STRING`、`DICT_EQUAL_STRING` 使用对象式宏，可直接作为函数指针
 传入配置，也可以直接调用。操作宏本身不能取函数地址；需要回调的 API
 继续通过配置结构中的函数指针提供，不依赖操作宏。
 
-旧版 `fht_init(...)` 等调用形式保留为兼容宏。实现函数 `fht_*_impl` 和
+旧版 `dict_init(...)` 等调用形式保留为兼容宏。实现函数 `dict_*_impl` 和
 数据结构的内部字段不作为稳定接口，应用应使用公开宏。
-宏包装不增加运行时分配，也不改变节点或表对象的内存布局。
+宏包装不增加运行时分配，也不改变节点或字典对象的内存布局。
+
+新代码使用 `include/dict.h`、`dict`、`dict_config` 和 `DICT_*`。
+原 `include/fht.h`、`fht`、`fht_config`、`FHT_*` 及旧小写调用保留为兼容层，
+委托到同一 dict 实现，不创建第二份存储或统计对象。旧项目级
+`FHT_ENABLE_MEMORY_STATS` / `FHT_MEMORY_STATS_IMPLEMENTATION` / 统计锁宏也保留；
+若同时设置新旧统计开关，值必须一致。
 
 ## API 与所有权
 
 | API | 行为 |
 | --- | --- |
-| `FHT_INIT` | 初始化未初始化或已销毁对象；不分配内存 |
-| `FHT_PUT` | 新增返回 `FHT_ADDED`；相同键替换返回 `FHT_REPLACED` |
-| `FHT_GET` | 找到返回 1，未找到返回 0；输出借用的 value |
-| `FHT_REMOVE` | 删除并调用配置的对象析构回调 |
-| `FHT_TAKE` | 删除但不析构，将 key/value 所有权交给调用方 |
-| `FHT_RESERVE` | 请求桶容量；正在迁移且请求更大容量时返回 `FHT_BUSY` |
-| `FHT_REHASH_STEP` | 手动迁移，返回消耗的工作单元数 |
-| `FHT_FOREACH` | 遍历两个表；回调返回非零时停止 |
-| `FHT_SIZE / FHT_CAPACITY` | 条目数 / 目标表桶数 |
-| `FHT_IS_REHASHING` | 是否处于双表迁移状态 |
-| `FHT_CLEAR` | 释放全部存储，保留配置，可继续插入 |
-| `FHT_DESTROY` | 释放并清零；再次使用前需要 init |
+| `DICT_INIT` | 初始化未初始化或已销毁对象；不分配内存 |
+| `DICT_PUT` | 新增返回 `DICT_ADDED`；相同键替换返回 `DICT_REPLACED` |
+| `DICT_GET` | 找到返回 1，未找到返回 0；输出借用的 value |
+| `DICT_REMOVE` | 删除并调用配置的对象析构回调 |
+| `DICT_TAKE` | 删除但不析构，将 key/value 所有权交给调用方 |
+| `DICT_RESERVE` | 请求桶容量；正在迁移且请求更大容量时返回 `DICT_BUSY` |
+| `DICT_REHASH_STEP` | 手动迁移，返回消耗的工作单元数 |
+| `DICT_FOREACH` | 遍历两个表；回调返回非零时停止 |
+| `DICT_SIZE / DICT_CAPACITY` | 条目数 / 目标表桶数 |
+| `DICT_IS_REHASHING` | 是否处于双表迁移状态 |
+| `DICT_CLEAR` | 释放全部存储，保留配置，可继续插入 |
+| `DICT_DESTROY` | 释放并清零；再次使用前需要 init |
 
 配置析构回调后，成功 put 的 key/value 由表负责释放；失败仍由调用方负责。
 替换时同时采用新的 key 和 value，释放原来的对象；对应指针未变则不释放。
@@ -117,7 +184,7 @@ ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
 同时作为 key/value。`take` 要求两个非 NULL 且不同的输出地址。
 
 初始化失败后不要调用其他操作；已初始化的表不要再次直接 init，也不要
-按值复制拥有动态内存的 `fht`。对象析构/分配/哈希/比较回调不得重入表操作。
+按值复制拥有动态内存的 `dict`。对象析构/分配/哈希/比较回调不得重入表操作。
 析构回调需要能够处理传入的 NULL value。
 
 ## 渐进式 rehash 与运行时间
@@ -127,7 +194,7 @@ ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
 迁移节点会重新调用 hash 回调，这是用计算量换取更小节点内存的选择。
 
 可设置 `c.rehash_work = 0` 关闭自动推进，随后在任务合适的位置调用
-`FHT_REHASH_STEP(&h, budget)`。设置预算只是限制迁移工作量，不是硬实时保证：
+`DICT_REHASH_STEP(&h, budget)`。设置预算只是限制迁移工作量，不是硬实时保证：
 新桶数组的分配/清零是同步的，查询可能遍历长链，回调和分配器耗时也不受限制。
 哈希函数应满足“比较相等的键具有相同哈希值”。默认字符串 FNV-1a 适合可信键；
 面对外部恶意输入，应使用带密钥的哈希，例如 SipHash。
@@ -135,7 +202,7 @@ ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
 迁移时，新条目进入新表；查找/删除查询两个表。迁移期间不会启动第二次扩容，
 也不会为了插入而强制完成迁移，所以禁用自动推进却不手动推进会使链增长。
 `foreach` 期间暂停迁移，可在回调中 get/size；修改、嵌套遍历和 clear/destroy
-返回 `FHT_BUSY`，遍历结束后自动恢复。
+返回 `DICT_BUSY`，遍历结束后自动恢复。
 
 没有内置 mutex、原子操作或 FreeRTOS 依赖。可直接用于单任务环境。
 多个任务共享同一表时需要调用方串行化访问；**get 也可能推进 rehash**。
@@ -155,6 +222,12 @@ ctest --test-dir build-cmake --output-on-failure
 测试覆盖多编译单元链接、字符串/整数键、NULL value、所有权转移与释放、
 逐个注入分配失败、全碰撞长链、单节点迁移预算、遍历期间修改保护，
 以及 20 万次对照模型随机操作。
+
+`make test` 同时测试统计开/关、跨编译单元共享、默认/自定义分配器混用、
+OOM 回滚、rehash 两张桶表的统计和清理后归零；另用四个 pthread 任务操作
+各自的表，验证共享统计锁。CMake 在支持 Threads 及 GNU/Clang 的主机上也
+运行该并发测试。测试强制启用 assert，避免其中的操作被 NDEBUG 去掉。
+这些仍是主机测试，不代表 ESP-IDF 5.5.1 或 ESP32-S3 板上验证已完成。
 
 当前工作区没有 CMake，已直接使用 GCC 验证 C99，分别运行优化构建和
 AddressSanitizer/UndefinedBehaviorSanitizer 构建。当前运行环境的 ptrace

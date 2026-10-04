@@ -1,406 +1,69 @@
 #ifndef FHT_H
 #define FHT_H
 
-/* C99 header-only chained hash table, inspired by Redis dict's two-table
- * incremental rehash. Independent implementation, no Redis dependency.
- * Not thread safe: serialize ALL operations on a shared table, including get.
- * Hash/equality/destructor/allocator callbacks must not reenter the table.
- * Keys must retain a stable hash/equality while stored. */
-#include <stddef.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
+/* Compatibility facade. New code should include dict.h and use DICT_*.
+ * Both APIs operate on the same dictionary and global accounting object. */
+#include "dict.h"
 
-#ifdef __cplusplus
-extern "C" {
+#ifndef FHT_ENABLE_MEMORY_STATS
+#define FHT_ENABLE_MEMORY_STATS DICT_ENABLE_MEMORY_STATS
 #endif
 
-typedef uint32_t (*fht_hash_fn)(const void *key, void *ctx);
-typedef int (*fht_equal_fn)(const void *a, const void *b, void *ctx);
-typedef void (*fht_destroy_fn)(void *object, void *ctx);
-typedef void *(*fht_alloc_fn)(size_t bytes, void *ctx);
-typedef void (*fht_free_fn)(void *ptr, void *ctx);
+typedef dict fht;
+typedef dict_hash_fn fht_hash_fn;
+typedef dict_equal_fn fht_equal_fn;
+typedef dict_destroy_fn fht_destroy_fn;
+typedef dict_alloc_fn fht_alloc_fn;
+typedef dict_free_fn fht_free_fn;
+typedef dict_status fht_status;
+typedef dict_config fht_config;
+typedef dict_entry fht_entry;
+typedef dict_table fht_table;
+typedef dict_memory_stats fht_memory_stats;
+typedef dict_visit_fn fht_visit_fn;
 
-typedef enum fht_status {
-    FHT_OK = 0, FHT_ADDED = 1, FHT_REPLACED = 2,
-    FHT_INVALID = -1, FHT_OOM = -2, FHT_OVERFLOW = -3,
-    FHT_BUSY = -4, FHT_NOT_FOUND = -5
-} fht_status;
+#define FHT_OK DICT_OK
+#define FHT_ADDED DICT_ADDED
+#define FHT_REPLACED DICT_REPLACED
+#define FHT_INVALID DICT_INVALID
+#define FHT_OOM DICT_OOM
+#define FHT_OVERFLOW DICT_OVERFLOW
+#define FHT_BUSY DICT_BUSY
+#define FHT_NOT_FOUND DICT_NOT_FOUND
+#define FHT_CONFIG_DEFAULT DICT_CONFIG_DEFAULT
+#define FHT_INIT DICT_INIT
+#define FHT_SIZE DICT_SIZE
+#define FHT_IS_REHASHING DICT_IS_REHASHING
+#define FHT_CAPACITY DICT_CAPACITY
+#define FHT_REHASH_STEP DICT_REHASH_STEP
+#define FHT_RESERVE DICT_RESERVE
+#define FHT_GET DICT_GET
+#define FHT_PUT DICT_PUT
+#define FHT_REMOVE DICT_REMOVE
+#define FHT_TAKE DICT_TAKE
+#define FHT_FOREACH DICT_FOREACH
+#define FHT_CLEAR DICT_CLEAR
+#define FHT_DESTROY DICT_DESTROY
+#define FHT_HASH_STRING DICT_HASH_STRING
+#define FHT_EQUAL_STRING DICT_EQUAL_STRING
+#define FHT_MEMORY_STATS_GET DICT_MEMORY_STATS_GET
+#define FHT_MEMORY_STATS_RESET DICT_MEMORY_STATS_RESET
 
-typedef struct fht_config {
-    fht_hash_fn hash;
-    fht_equal_fn equal;
-    fht_destroy_fn destroy_key;
-    fht_destroy_fn destroy_value;
-    fht_alloc_fn alloc;           /* alloc/free must both be set, or both NULL */
-    fht_free_fn free;
-    void *ctx;                    /* passed to every callback */
-    size_t rehash_work;            /* per-operation work units; 0 = manual */
-} fht_config;
+#define fht_config_default dict_config_default
+#define fht_init dict_init
+#define fht_size dict_size
+#define fht_is_rehashing dict_is_rehashing
+#define fht_capacity dict_capacity
+#define fht_rehash_step dict_rehash_step
+#define fht_reserve dict_reserve
+#define fht_get dict_get
+#define fht_put dict_put
+#define fht_remove dict_remove
+#define fht_take dict_take
+#define fht_foreach dict_foreach
+#define fht_clear dict_clear
+#define fht_destroy dict_destroy
+#define fht_hash_string dict_hash_string
+#define fht_equal_string dict_equal_string
 
-typedef struct fht_entry {
-    struct fht_entry *next;
-    void *key;
-    void *value;
-} fht_entry;
-
-typedef struct fht_table {
-    fht_entry **buckets;
-    size_t capacity;
-    size_t used;
-} fht_table;
-
-typedef struct fht {
-    fht_config config;
-    fht_table tables[2];
-    size_t rehash_index;
-    unsigned visiting;
-} fht;
-
-static inline void *fht_default_alloc_impl(size_t bytes, void *ctx) {
-    (void)ctx;
-    return malloc(bytes);
-}
-static inline void fht_default_free_impl(void *ptr, void *ctx) {
-    (void)ctx;
-    free(ptr);
-}
-static inline fht_config fht_config_default_impl(fht_hash_fn hash,
-                                            fht_equal_fn equal) {
-    fht_config c;
-    memset(&c, 0, sizeof(c));
-    c.hash = hash;
-    c.equal = equal;
-    c.rehash_work = 2;
-    return c;
-}
-/* Initialize an uninitialized or destroyed object; no allocation occurs. */
-static inline fht_status fht_init_impl(fht *h, const fht_config *config) {
-    if (!h || !config || !config->hash || !config->equal ||
-        (!!config->alloc != !!config->free)) return FHT_INVALID;
-    memset(h, 0, sizeof(*h));
-    h->config = *config;
-    if (!h->config.alloc) {
-        h->config.alloc = fht_default_alloc_impl;
-        h->config.free = fht_default_free_impl;
-    }
-    return FHT_OK;
-}
-static inline size_t fht_size_impl(const fht *h) {
-    return h->tables[0].used + h->tables[1].used;
-}
-static inline int fht_is_rehashing_impl(const fht *h) {
-    return h->tables[1].buckets != NULL;
-}
-static inline size_t fht_capacity_impl(const fht *h) {
-    return h->tables[fht_is_rehashing_impl(h) ? 1 : 0].capacity;
-}
-static inline void fht_finish_rehash_impl(fht *h) {
-    if (fht_is_rehashing_impl(h) && h->tables[0].used == 0) {
-        h->config.free(h->tables[0].buckets, h->config.ctx);
-        h->tables[0] = h->tables[1];
-        memset(&h->tables[1], 0, sizeof(h->tables[1]));
-        h->rehash_index = 0;
-    }
-}
-/* At most budget units: one unit moves ONE entry or skips ONE empty bucket.
- * Allocation-free. Does not bound wall time of allocators or callbacks. */
-static inline size_t fht_rehash_step_impl(fht *h, size_t budget) {
-    size_t work = 0;
-    if (h->visiting) return 0;
-    fht_finish_rehash_impl(h);
-    while (fht_is_rehashing_impl(h) && work < budget) {
-        fht_table *old = &h->tables[0], *next = &h->tables[1];
-        fht_entry *e = old->buckets[h->rehash_index];
-        if (!e) {
-            ++h->rehash_index;
-        } else {
-            size_t bucket = (size_t)h->config.hash(e->key, h->config.ctx) &
-                            (next->capacity - 1);
-            old->buckets[h->rehash_index] = e->next;
-            e->next = next->buckets[bucket];
-            next->buckets[bucket] = e;
-            --old->used;
-            ++next->used;
-        }
-        ++work;
-        fht_finish_rehash_impl(h);
-    }
-    return work;
-}
-/* Request capacity for at least entries at load factor <= 1. During an
- * active rehash, larger requests return BUSY; call rehash_step and retry.
- * Allocating/zeroing the new bucket array is synchronous, unlike migration. */
-static inline fht_status fht_reserve_impl(fht *h, size_t entries) {
-    size_t capacity = 4;
-    fht_entry **buckets;
-    if (h->visiting) return FHT_BUSY;
-    if (entries <= fht_capacity_impl(h)) return FHT_OK;
-    if (fht_is_rehashing_impl(h)) return FHT_BUSY;
-    while (capacity < entries) {
-        if (capacity > SIZE_MAX / 2) return FHT_OVERFLOW;
-        capacity *= 2;
-    }
-    if (capacity > SIZE_MAX / sizeof(*buckets)) return FHT_OVERFLOW;
-    buckets = (fht_entry **)h->config.alloc(capacity * sizeof(*buckets),
-                                           h->config.ctx);
-    if (!buckets) return FHT_OOM;
-    memset(buckets, 0, capacity * sizeof(*buckets));
-    if (!h->tables[0].buckets) {
-        h->tables[0].buckets = buckets;
-        h->tables[0].capacity = capacity;
-    } else {
-        h->tables[1].buckets = buckets;
-        h->tables[1].capacity = capacity;
-        h->rehash_index = 0;
-        fht_finish_rehash_impl(h);
-    }
-    return FHT_OK;
-}
-static inline fht_entry **fht_find_impl(fht *h, const void *key,
-                                    uint32_t hash, unsigned *table_index) {
-    unsigned i;
-    for (i = 0; i < 2; ++i) {
-        fht_table *t = &h->tables[i];
-        fht_entry **link;
-        if (!t->buckets) continue;
-        link = &t->buckets[(size_t)hash & (t->capacity - 1)];
-        while (*link) {
-            if (h->config.equal((*link)->key, key, h->config.ctx)) {
-                if (table_index) *table_index = i;
-                return link;
-            }
-            link = &(*link)->next;
-        }
-    }
-    return NULL;
-}
-/* Returns 1 if found, including stored NULL values. On miss *value = NULL.
- * Returned objects are borrowed, valid until replacement/removal/clear. */
-static inline int fht_get_impl(fht *h, const void *key, void **value) {
-    fht_entry **link;
-    fht_rehash_step_impl(h, h->config.rehash_work);
-    link = fht_find_impl(h, key, h->config.hash(key, h->config.ctx), NULL);
-    if (value) *value = link ? (*link)->value : NULL;
-    return link != NULL;
-}
-/* On success table owns key/value per configured destructors. On error
- * ownership stays with caller. Replacement adopts BOTH new key and value,
- * destroying old objects unless their corresponding pointers are unchanged.
- * Key/value ownership must be independent (no aliases between owned objects). */
-static inline fht_status fht_put_impl(fht *h, void *key, void *value) {
-    uint32_t hash;
-    fht_entry **link, *e;
-    fht_table *t;
-    size_t bucket, size;
-    fht_status status;
-    if (h->visiting) return FHT_BUSY;
-    fht_rehash_step_impl(h, h->config.rehash_work);
-    hash = h->config.hash(key, h->config.ctx);
-    link = fht_find_impl(h, key, hash, NULL);
-    if (link) {
-        e = *link;
-        if (e->key != key && h->config.destroy_key)
-            h->config.destroy_key(e->key, h->config.ctx);
-        if (e->value != value && h->config.destroy_value)
-            h->config.destroy_value(e->value, h->config.ctx);
-        e->key = key;
-        e->value = value;
-        return FHT_REPLACED;
-    }
-    size = fht_size_impl(h);
-    if (size == SIZE_MAX) return FHT_OVERFLOW;
-    e = (fht_entry *)h->config.alloc(sizeof(*e), h->config.ctx);
-    if (!e) return FHT_OOM;
-    /* While migrating, allow chains to grow instead of forcing completion. */
-    if (!fht_is_rehashing_impl(h) && size >= h->tables[0].capacity) {
-        status = fht_reserve_impl(h, size + 1);
-        if (status != FHT_OK) {
-            h->config.free(e, h->config.ctx);
-            return status;
-        }
-    }
-    t = &h->tables[fht_is_rehashing_impl(h) ? 1 : 0];
-    bucket = (size_t)hash & (t->capacity - 1);
-    e->key = key;
-    e->value = value;
-    e->next = t->buckets[bucket];
-    t->buckets[bucket] = e;
-    ++t->used;
-    return FHT_ADDED;
-}
-static inline fht_status fht_remove_entry_impl(fht *h, const void *key,
-                                      void **out_key, void **out_value,
-                                      int take) {
-    fht_entry **link, *e;
-    unsigned table_index = 0;
-    if (out_key) *out_key = NULL;
-    if (out_value) *out_value = NULL;
-    if (h->visiting) return FHT_BUSY;
-    fht_rehash_step_impl(h, h->config.rehash_work);
-    link = fht_find_impl(h, key, h->config.hash(key, h->config.ctx), &table_index);
-    if (!link) return FHT_NOT_FOUND;
-    e = *link;
-    *link = e->next;
-    --h->tables[table_index].used;
-    if (take) {
-        if (out_key) *out_key = e->key;
-        if (out_value) *out_value = e->value;
-    } else {
-        if (h->config.destroy_key) h->config.destroy_key(e->key, h->config.ctx);
-        if (h->config.destroy_value) h->config.destroy_value(e->value, h->config.ctx);
-    }
-    h->config.free(e, h->config.ctx);
-    fht_finish_rehash_impl(h);
-    return FHT_OK;
-}
-static inline fht_status fht_remove_impl(fht *h, const void *key) {
-    return fht_remove_entry_impl(h, key, NULL, NULL, 0);
-}
-/* Transfer BOTH objects to caller without destructors. Both outputs required. */
-static inline fht_status fht_take_impl(fht *h, const void *key,
-                                  void **out_key, void **out_value) {
-    if (!out_key || !out_value || out_key == out_value) return FHT_INVALID;
-    return fht_remove_entry_impl(h, key, out_key, out_value, 1);
-}
-/* Visit each entry exactly once, even during rehash. Return nonzero to stop.
- * Callback may call get/size but mutation/reserve/clear returns BUSY.
- * Recursive visits are rejected. Never destroy the table inside a callback. */
-typedef int (*fht_visit_fn)(const void *key, void *value, void *ctx);
-static inline fht_status fht_foreach_impl(fht *h, fht_visit_fn visit, void *ctx) {
-    unsigned i;
-    if (!visit) return FHT_INVALID;
-    if (h->visiting) return FHT_BUSY;
-    h->visiting = 1;
-    for (i = 0; i < 2; ++i) {
-        size_t b;
-        for (b = 0; b < h->tables[i].capacity; ++b) {
-            fht_entry *e = h->tables[i].buckets[b];
-            while (e) {
-                if (visit(e->key, e->value, ctx)) {
-                    h->visiting = 0;
-                    return FHT_OK;
-                }
-                e = e->next;
-            }
-        }
-    }
-    h->visiting = 0;
-    return FHT_OK;
-}
-/* Free all storage and owned objects, keep config; table can be reused. */
-static inline fht_status fht_clear_impl(fht *h) {
-    unsigned i;
-    if (h->visiting) return FHT_BUSY;
-    for (i = 0; i < 2; ++i) {
-        size_t b;
-        for (b = 0; b < h->tables[i].capacity; ++b) {
-            fht_entry *e = h->tables[i].buckets[b];
-            while (e) {
-                fht_entry *next = e->next;
-                if (h->config.destroy_key)
-                    h->config.destroy_key(e->key, h->config.ctx);
-                if (h->config.destroy_value)
-                    h->config.destroy_value(e->value, h->config.ctx);
-                h->config.free(e, h->config.ctx);
-                e = next;
-            }
-        }
-        if (h->tables[i].buckets)
-            h->config.free(h->tables[i].buckets, h->config.ctx);
-        memset(&h->tables[i], 0, sizeof(h->tables[i]));
-    }
-    h->rehash_index = 0;
-    return FHT_OK;
-}
-static inline fht_status fht_destroy_impl(fht *h) {
-    fht_status status = fht_clear_impl(h);
-    if (status == FHT_OK) memset(h, 0, sizeof(*h));
-    return status;
-}
-/* Convenience hash for trusted string keys: FNV-1a, NOT collision resistant.
- * For untrusted keys provide a keyed hash, e.g. SipHash. */
-static inline uint32_t fht_hash_string_impl(const void *key, void *ctx) {
-    const unsigned char *s = (const unsigned char *)key;
-    uint32_t hash = UINT32_C(2166136261);
-    (void)ctx;
-    while (*s) { hash ^= *s++; hash *= UINT32_C(16777619); }
-    return hash;
-}
-static inline int fht_equal_string_impl(const void *a, const void *b, void *ctx) {
-    (void)ctx;
-    return strcmp((const char *)a, (const char *)b) == 0;
-}
-
-/* Public API. Each argument appears exactly once in the expansion; normal C
- * function-call type checking and argument evaluation order still apply.
- * *_impl functions are implementation details, not the public contract. */
-#define FHT_CONFIG_DEFAULT(hash_fn, equal_fn) \
-    (fht_config_default_impl((hash_fn), (equal_fn)))
-#define FHT_INIT(table, config) \
-    (fht_init_impl((table), (config)))
-#define FHT_SIZE(table) \
-    (fht_size_impl((table)))
-#define FHT_IS_REHASHING(table) \
-    (fht_is_rehashing_impl((table)))
-#define FHT_CAPACITY(table) \
-    (fht_capacity_impl((table)))
-#define FHT_REHASH_STEP(table, budget) \
-    (fht_rehash_step_impl((table), (budget)))
-#define FHT_RESERVE(table, entries) \
-    (fht_reserve_impl((table), (entries)))
-#define FHT_GET(table, key, out_value) \
-    (fht_get_impl((table), (key), (out_value)))
-#define FHT_PUT(table, key, value) \
-    (fht_put_impl((table), (key), (value)))
-#define FHT_REMOVE(table, key) \
-    (fht_remove_impl((table), (key)))
-#define FHT_TAKE(table, key, out_key, out_value) \
-    (fht_take_impl((table), (key), (out_key), (out_value)))
-#define FHT_FOREACH(table, visit_fn, ctx) \
-    (fht_foreach_impl((table), (visit_fn), (ctx)))
-#define FHT_CLEAR(table) \
-    (fht_clear_impl((table)))
-#define FHT_DESTROY(table) \
-    (fht_destroy_impl((table)))
-
-/* Object-like aliases: usable both as callbacks and in direct calls. */
-#define FHT_HASH_STRING fht_hash_string_impl
-#define FHT_EQUAL_STRING fht_equal_string_impl
-
-/* Compatibility macros for existing source using the original API names. */
-#define fht_config_default(hash_fn, equal_fn) \
-    FHT_CONFIG_DEFAULT((hash_fn), (equal_fn))
-#define fht_init(table, config) \
-    FHT_INIT((table), (config))
-#define fht_size(table) \
-    FHT_SIZE((table))
-#define fht_is_rehashing(table) \
-    FHT_IS_REHASHING((table))
-#define fht_capacity(table) \
-    FHT_CAPACITY((table))
-#define fht_rehash_step(table, budget) \
-    FHT_REHASH_STEP((table), (budget))
-#define fht_reserve(table, entries) \
-    FHT_RESERVE((table), (entries))
-#define fht_get(table, key, out_value) \
-    FHT_GET((table), (key), (out_value))
-#define fht_put(table, key, value) \
-    FHT_PUT((table), (key), (value))
-#define fht_remove(table, key) \
-    FHT_REMOVE((table), (key))
-#define fht_take(table, key, out_key, out_value) \
-    FHT_TAKE((table), (key), (out_key), (out_value))
-#define fht_foreach(table, visit_fn, ctx) \
-    FHT_FOREACH((table), (visit_fn), (ctx))
-#define fht_clear(table) \
-    FHT_CLEAR((table))
-#define fht_destroy(table) \
-    FHT_DESTROY((table))
-#define fht_hash_string FHT_HASH_STRING
-#define fht_equal_string FHT_EQUAL_STRING
-
-#ifdef __cplusplus
-}
-#endif
 #endif /* FHT_H */

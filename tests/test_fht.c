@@ -91,6 +91,8 @@ static void test_oom(void) {
             if (present[i]) assert(v == &values[i]);
         }
         assert(FHT_DESTROY(&h) == FHT_OK && t.live == 0);
+        assert(FHT_MEMORY_STATS_GET().live_bytes == 0);
+        assert(FHT_MEMORY_STATS_GET().live_blocks == 0);
     }
 }
 typedef struct visit_context {
@@ -294,6 +296,8 @@ int main(void) {
     test_random(int_hash, 0);
     test_random(collision_hash, 2);
     test_random(collision_hash, 0);
+    assert(FHT_MEMORY_STATS_GET().live_bytes == 0);
+    assert(FHT_MEMORY_STATS_GET().live_blocks == 0);
     puts("All fht tests passed (200000 randomized operations).");
     return 0;
 }

@@ -390,14 +390,6 @@ static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_copy_impl)(RTOS_SYMB
     }
     return status;
 }
-/* Configured copy mode also applies to normal PUT. Without copy callbacks,
- * retain the original ownership-transfer/borrowing contract. */
-static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_impl)(RTOS_SYMBOL(dict) *h,
-                                        void *key, void *value) {
-    if (h->config.copy_key || h->config.copy_value)
-        return RTOS_SYMBOL(dict_put_copy_impl)(h, key, value);
-    return RTOS_SYMBOL(dict_put_owned_impl)(h, key, value);
-}
 static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_remove_entry_impl)(RTOS_SYMBOL(dict) *h, const void *key,
                                       void **out_key, void **out_value,
                                       int take) {
@@ -523,9 +515,8 @@ static inline int RTOS_SYMBOL(dict_equal_string_impl)(const void *a, const void 
     (RTOS_SYMBOL(dict_reserve_impl)((table), (entries)))
 #define DICT_GET(table, key, out_value) \
     (RTOS_SYMBOL(dict_get_impl)((table), (key), (out_value)))
-#define DICT_PUT(table, key, value) \
-    (RTOS_SYMBOL(dict_put_impl)((table), (key), (value)))
-#define DICT_PUT_COPY(table, key, value) \
+/* The sole public insertion macro always copies; input ownership never moves. */
+#define Dict_put(table, key, value) \
     (RTOS_SYMBOL(dict_put_copy_impl)((table), (key), (value)))
 #define DICT_REMOVE(table, key) \
     (RTOS_SYMBOL(dict_remove_impl)((table), (key)))
@@ -559,10 +550,6 @@ static inline int RTOS_SYMBOL(dict_equal_string_impl)(const void *a, const void 
     DICT_RESERVE((table), (entries))
 #define dict_get(table, key, out_value) \
     DICT_GET((table), (key), (out_value))
-#define dict_put(table, key, value) \
-    DICT_PUT((table), (key), (value))
-#define dict_put_copy(table, key, value) \
-    DICT_PUT_COPY((table), (key), (value))
 #define dict_remove(table, key) \
     DICT_REMOVE((table), (key))
 #define dict_take(table, key, out_key, out_value) \

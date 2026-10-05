@@ -1,3 +1,5 @@
+/* Internal engine tests exercise borrowed/owned insertion directly.
+ * Public callers use Dict_put (copy-only); see test_dict_copy.c. */
 #include "dict.h"
 #include <assert.h>
 #include <stdio.h>
@@ -72,8 +74,8 @@ static void test_shared_tables(void) {
     expect(other_bytes, 2);
     assert(DICT_RESERVE(&h, 8) == DICT_OK);
     expect(other_bytes + a.bytes, 2 + a.blocks);
-    assert(DICT_PUT(&h, key, &value) == DICT_ADDED);
-    assert(DICT_PUT(&h, replacement, &updated) == DICT_REPLACED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, key, &value) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, replacement, &updated) == DICT_REPLACED);
     expect(other_bytes + 8 * sizeof(dict_entry *) + sizeof(dict_entry), 4);
 #if DICT_ENABLE_MEMORY_STATS
     assert(DICT_MEMORY_STATS_RESET() == DICT_BUSY);
@@ -105,7 +107,7 @@ static void test_oom_and_rehash(void) {
         c.rehash_work = 0; a.fail_at = failure;
         assert(DICT_INIT(&h, &c) == DICT_OK);
         for (i = 0; i < 5; ++i) {
-            dict_status s = DICT_PUT(&h, keys[i], NULL);
+            dict_status s = RTOS_SYMBOL(dict_put_owned_impl)(&h, keys[i], NULL);
             assert(s == DICT_ADDED || s == DICT_OOM);
             expect(a.bytes, a.blocks);
         }

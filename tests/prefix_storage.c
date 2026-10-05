@@ -1,3 +1,5 @@
+/* Internal engine tests exercise borrowed/owned insertion directly.
+ * Public callers use Dict_put (copy-only); see test_dict_copy.c. */
 #define DICT_MEMORY_STATS_IMPLEMENTATION
 #include "dict.h"
 #include "sds.h"
@@ -14,7 +16,7 @@ int RTOS_SYMBOL(prefix_roundtrip)(void) {
     assert(key && length(key) == 8);
     assert(DICT_MEMORY_STATS_GET().live_blocks == 0);
     assert(DICT_INIT(&h, &config) == DICT_OK);
-    assert(DICT_PUT(&h, key, &value) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, key, &value) == DICT_ADDED);
     assert(DICT_GET(&h, "prefixed", &out) && out == &value);
     assert(DICT_MEMORY_STATS_GET().live_blocks == 2);
     assert(DICT_DESTROY(&h) == DICT_OK);

@@ -77,7 +77,7 @@ static int put_copied(DICT_T *d, const char *text, int number, memory_tracker *t
         return 0;
     }
     *value = number;
-    status = DICT_PUT_COPY(d, key, value);
+    status = Dict_put(d, key, value);
     /* Source objects always stay caller-owned; dict owns only the copies. */
     SDS_FREE(key, &allocator);
     shared_free(value, t);

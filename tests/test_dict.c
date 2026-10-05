@@ -1,3 +1,5 @@
+/* Internal engine tests exercise borrowed/owned insertion directly.
+ * Public callers use Dict_put (copy-only); see test_dict_copy.c. */
 #include "dict.h"
 #include <assert.h>
 #include <stdio.h>
@@ -48,19 +50,19 @@ static void test_ownership(void) {
     c.ctx = &t; c.alloc = tracked_alloc; c.free = tracked_free;
     c.destroy_key = destroy_key; c.destroy_value = destroy_value;
     assert(DICT_INIT(&h, &c) == DICT_OK);
-    assert(DICT_PUT(&h, k, v) == DICT_ADDED);
-    assert(DICT_PUT(&h, k, v) == DICT_REPLACED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, k, v) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, k, v) == DICT_REPLACED);
     assert(t.keys == 0 && t.values == 0);
     k = new_int(7); v = new_int(20);
-    assert(DICT_PUT(&h, k, v) == DICT_REPLACED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, k, v) == DICT_REPLACED);
     assert(t.keys == 1 && t.values == 1);
     assert(DICT_TAKE(&h, &query, &out_key, &out_value) == DICT_OK);
     assert(out_key == k && out_value == v);
     free(out_key); free(out_value);
-    assert(DICT_PUT(&h, new_int(7), new_int(30)) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, new_int(7), new_int(30)) == DICT_ADDED);
     assert(DICT_REMOVE(&h, &query) == DICT_OK);
     assert(t.keys == 2 && t.values == 2);
-    assert(DICT_PUT(&h, new_int(7), NULL) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, new_int(7), NULL) == DICT_ADDED);
     assert(DICT_GET(&h, &query, &out_value) && out_value == NULL);
     assert(DICT_DESTROY(&h) == DICT_OK);
     assert(t.keys == 3 && t.values == 3 && t.live == 0);
@@ -80,7 +82,7 @@ static void test_oom(void) {
         for (i = 0; i < 40; ++i) {
             dict_status s;
             keys[i] = (int)i; values[i] = (int)i + 100;
-            s = DICT_PUT(&h, &keys[i], &values[i]);
+            s = RTOS_SYMBOL(dict_put_owned_impl)(&h, &keys[i], &values[i]);
             assert(s == DICT_ADDED || s == DICT_OOM);
             if (s == DICT_ADDED) { present[i] = 1; ++count; }
         }
@@ -106,7 +108,7 @@ static int visit(const void *key, void *value, void *ctx) {
     size_t old_used = v->h->tables[0].used;
     assert(DICT_GET(v->h, key, &found) && found == value);
     assert(v->h->tables[0].used == old_used);
-    assert(DICT_PUT(v->h, (void *)key, value) == DICT_BUSY);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(v->h, (void *)key, value) == DICT_BUSY);
     assert(DICT_REMOVE(v->h, key) == DICT_BUSY);
     assert(DICT_CLEAR(v->h) == DICT_BUSY);
     assert(DICT_DESTROY(v->h) == DICT_BUSY);
@@ -127,7 +129,7 @@ static void test_manual_collision_rehash(void) {
     assert(DICT_RESERVE(&h, 100) == DICT_OK);
     for (i = 0; i < 100; ++i) {
         keys[i] = i; values[i] = i * 10;
-        assert(DICT_PUT(&h, &keys[i], &values[i]) == DICT_ADDED);
+        assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, &keys[i], &values[i]) == DICT_ADDED);
     }
     assert(DICT_RESERVE(&h, 200) == DICT_OK);
     assert(DICT_IS_REHASHING(&h));
@@ -150,7 +152,7 @@ static void test_manual_collision_rehash(void) {
     for (i = 0; i < 100; ++i) assert(DICT_REMOVE(&h, &keys[i]) == DICT_OK);
     assert(!DICT_IS_REHASHING(&h) && DICT_SIZE(&h) == 0);
     assert(DICT_CLEAR(&h) == DICT_OK);
-    assert(DICT_PUT(&h, &keys[0], &values[0]) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, &keys[0], &values[0]) == DICT_ADDED);
     assert(DICT_DESTROY(&h) == DICT_OK);
 }
 static uint32_t rng_state = UINT32_C(1234567);
@@ -174,7 +176,7 @@ static void test_random(dict_hash_fn hash, size_t work) {
         int k = (int)(r % KEY_COUNT);
         switch ((r >> 16) % 4) {
         case 0:
-            assert(DICT_PUT(&h, &keys[k], &values[k]) ==
+            assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, &keys[k], &values[k]) ==
                    (present[k] ? DICT_REPLACED : DICT_ADDED));
             if (!present[k]) { present[k] = 1; ++count; }
             break;
@@ -215,7 +217,7 @@ static void test_invalid_and_strings(void) {
     assert(DICT_INIT(&h, &c) == DICT_OK);
     assert(DICT_GET(&h, key, &value) == 0 && value == NULL);
     assert(DICT_RESERVE(&h, SIZE_MAX) == DICT_OVERFLOW);
-    assert(DICT_PUT(&h, key, val) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, key, val) == DICT_ADDED);
     assert(DICT_GET(&h, same, &value) == 1 && value == val);
     assert(DICT_TAKE(&h, key, NULL, &value) == DICT_INVALID);
     assert(DICT_TAKE(&h, key, &value, &value) == DICT_INVALID);
@@ -251,7 +253,7 @@ static void test_macro_api(void) {
     assert(DICT_RESERVE(table++, entries++) == DICT_OK);
     assert(table == tables + 1 && entries == 9);
     table = tables;
-    assert(DICT_PUT(table++, *key_ptr++, *value_ptr++) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(table++, *key_ptr++, *value_ptr++) == DICT_ADDED);
     assert(table == tables + 1 && key_ptr == keys + 1 &&
            value_ptr == values + 1);
     table = tables; key_ptr = keys;
@@ -274,7 +276,7 @@ static void test_macro_api(void) {
     assert(table == tables + 1 && key_ptr == keys + 1 &&
            taken_key == taken_keys + 1 && taken_value == taken_values + 1);
     assert(taken_keys[0] == key && taken_values[0] == &value);
-    assert(DICT_PUT(tables, key, &value) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_owned_impl)(tables, key, &value) == DICT_ADDED);
     table = tables; key_ptr = keys;
     assert(DICT_REMOVE(table++, *key_ptr++) == DICT_OK);
     assert(table == tables + 1 && key_ptr == keys + 1);

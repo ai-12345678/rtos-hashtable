@@ -1,3 +1,5 @@
+/* Internal engine tests exercise borrowed/owned insertion directly.
+ * Public callers use Dict_put (copy-only); see test_dict_copy.c. */
 #include "dict.h"
 #include <assert.h>
 #include <pthread.h>
@@ -23,7 +25,7 @@ static void *worker(void *unused) {
         size_t i;
         c.alloc = thread_alloc; c.free = thread_free;
         assert(DICT_INIT(&h, &c) == DICT_OK);
-        for (i = 0; i < 5; ++i) assert(DICT_PUT(&h, keys[i], NULL) == DICT_ADDED);
+        for (i = 0; i < 5; ++i) assert(RTOS_SYMBOL(dict_put_owned_impl)(&h, keys[i], NULL) == DICT_ADDED);
         while (DICT_IS_REHASHING(&h)) (void)DICT_REHASH_STEP(&h, 1);
         assert(DICT_RESERVE(&h, 32) == DICT_OK);
         while (DICT_IS_REHASHING(&h)) (void)DICT_REHASH_STEP(&h, 1);

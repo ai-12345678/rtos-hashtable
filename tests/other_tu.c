@@ -1,3 +1,5 @@
+/* Internal engine tests exercise borrowed/owned insertion directly.
+ * Public callers use Dict_put (copy-only); see test_dict_copy.c. */
 #define DICT_MEMORY_STATS_IMPLEMENTATION
 #include "dict.h"
 #include "sds.h"
@@ -19,7 +21,7 @@ static int other_value;
 int dict_other_table_create(void) {
     dict_config c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
     if (DICT_INIT(&other_table, &c) != DICT_OK) return 1;
-    return DICT_PUT(&other_table, other_key, &other_value) == DICT_ADDED ? 0 : 1;
+    return RTOS_SYMBOL(dict_put_owned_impl)(&other_table, other_key, &other_value) == DICT_ADDED ? 0 : 1;
 }
 int dict_other_table_destroy(void) {
     return DICT_DESTROY(&other_table) == DICT_OK ? 0 : 1;

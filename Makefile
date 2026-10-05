@@ -5,7 +5,7 @@ SOURCES = tests/test_dict.c tests/other_tu.c
 
 .PHONY: test sanitize clean
 
-test: build/dict_test_release build/dict_test_stats build/dict_memory_off build/dict_memory_on build/dict_memory_thread build/sds_test build/prefix_test
+test: build/dict_test_release build/dict_test_stats build/dict_memory_off build/dict_memory_on build/dict_memory_thread build/sds_test build/prefix_test build/shared_allocator build/shared_allocator_off build/shared_allocator_prefix
 	./build/dict_test_release
 	./build/dict_test_stats
 	./build/dict_memory_off
@@ -13,6 +13,21 @@ test: build/dict_test_release build/dict_test_stats build/dict_memory_off build/
 	./build/dict_memory_thread
 	./build/sds_test
 	./build/prefix_test
+	./build/shared_allocator --test
+	./build/shared_allocator_off --test
+	./build/shared_allocator_prefix --test
+
+build/shared_allocator: examples/shared_allocator.c include/dict.h include/sds.h include/rtos_namespace.h
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG -DDICT_ENABLE_MEMORY_STATS=1 $< -o $@
+
+build/shared_allocator_off: examples/shared_allocator.c include/dict.h include/sds.h include/rtos_namespace.h
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG $< -o $@
+
+build/shared_allocator_prefix: examples/shared_allocator.c include/dict.h include/sds.h include/rtos_namespace.h
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG -DDICT_ENABLE_MEMORY_STATS=1 -DRTOS_PREFIX=app_ $< -o $@
 
 build/prefix_default.o: tests/prefix_storage.c include/dict.h include/sds.h include/rtos_namespace.h
 	mkdir -p build
@@ -63,6 +78,10 @@ sanitize:
 	$(CC) $(CPPFLAGS) -std=c99 -g -Wall -Wextra -Wpedantic -Werror -UNDEBUG -DDICT_ENABLE_MEMORY_STATS=1 -DRTOS_PREFIX=demo_ -fsanitize=address,undefined -c tests/prefix_storage.c -o build/prefix_custom_sanitize.o
 	$(CC) $(CPPFLAGS) -std=c99 -g -Wall -Wextra -Wpedantic -Werror -UNDEBUG -DDICT_ENABLE_MEMORY_STATS=1 -DRTOS_PREFIX=demo_ -fsanitize=address,undefined tests/test_prefix.c build/prefix_default_sanitize.o build/prefix_custom_sanitize.o -o build/prefix_sanitize
 	./build/prefix_sanitize
+	$(CC) $(CPPFLAGS) -std=c99 -g -Wall -Wextra -Wpedantic -Werror -UNDEBUG -DDICT_ENABLE_MEMORY_STATS=1 -fsanitize=address,undefined -fno-omit-frame-pointer examples/shared_allocator.c -o build/shared_allocator_sanitize
+	./build/shared_allocator_sanitize --test
+	$(CC) $(CPPFLAGS) -std=c99 -g -Wall -Wextra -Wpedantic -Werror -UNDEBUG -DDICT_ENABLE_MEMORY_STATS=1 -DRTOS_PREFIX=app_ -fsanitize=address,undefined -fno-omit-frame-pointer examples/shared_allocator.c -o build/shared_allocator_prefix_sanitize
+	./build/shared_allocator_prefix_sanitize --test
 
 clean:
 	rm -rf build

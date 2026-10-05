@@ -1,7 +1,7 @@
 /* Pure C, table operations have no built-in locks. Call from a single task (or serialize externally).
  * Copy into an ESP-IDF component; add ../include to INCLUDE_DIRS.
  * Table access still needs external serialization; the stats mux only protects
- * shared accounting. Include esp_idf_dict_config.h before RTOS_SYMBOL(dict).h in all TUs. */
+ * shared accounting. Include esp_idf_dict_config.h before DICT_T.h in all TUs. */
 #include "esp_idf_dict_config.h"
 #define DICT_MEMORY_STATS_IMPLEMENTATION
 #include "dict.h"
@@ -22,16 +22,16 @@ static void idf_free(void *ptr, void *ctx) {
     heap_caps_free(ptr);
 }
 static void idf_destroy_string(void *ptr, void *ctx) {
-    SDS_FREE((RTOS_SYMBOL(sds))ptr, (const RTOS_SYMBOL(sds_allocator) *)ctx);
+    SDS_FREE((SDS_T)ptr, (const SDS_ALLOCATOR_T *)ctx);
 }
 void app_main(void) {
-    RTOS_SYMBOL(dict) sensors;
-    RTOS_SYMBOL(dict_config) config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
-    RTOS_SYMBOL(sds_allocator) strings = {idf_malloc, idf_free, NULL};
-    RTOS_SYMBOL(sds) key = NULL;
+    DICT_T sensors;
+    DICT_CONFIG_T config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
+    SDS_ALLOCATOR_T strings = {idf_malloc, idf_free, NULL};
+    SDS_T key = NULL;
     int *temperature = NULL;
     void *value = NULL;
-    RTOS_SYMBOL(dict_status) status;
+    DICT_STATUS_T status;
     config.alloc = idf_malloc;
     config.free = idf_free;
     config.ctx = &strings;
@@ -66,7 +66,7 @@ done:
     if (status < 0) ESP_LOGE("dict", "Operation failed: %d", (int)status);
     status = DICT_DESTROY(&sensors);
     if (status == DICT_OK) {
-        RTOS_SYMBOL(dict_memory_stats) stats = DICT_MEMORY_STATS_GET();
+        DICT_MEMORY_STATS_T stats = DICT_MEMORY_STATS_GET();
         ESP_LOGI("dict", "global live=%u bytes/%u blocks, peak=%u bytes",
                  (unsigned)stats.live_bytes, (unsigned)stats.live_blocks,
                  (unsigned)stats.peak_bytes);

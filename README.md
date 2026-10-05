@@ -43,14 +43,14 @@ static void example_free(void *ptr, void *ctx) {
     free(ptr);
 }
 static void example_destroy_string(void *ptr, void *ctx) {
-    SDS_FREE((RTOS_SYMBOL(sds))ptr, (const RTOS_SYMBOL(sds_allocator) *)ctx);
+    SDS_FREE((SDS_T)ptr, (const SDS_ALLOCATOR_T *)ctx);
 }
 
 void example(void) {
-    RTOS_SYMBOL(dict) h;
-    RTOS_SYMBOL(dict_config) c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
-    RTOS_SYMBOL(sds_allocator) strings = {example_malloc, example_free, NULL};
-    RTOS_SYMBOL(sds) key = NULL;
+    DICT_T h;
+    DICT_CONFIG_T c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
+    SDS_ALLOCATOR_T strings = {example_malloc, example_free, NULL};
+    SDS_T key = NULL;
     int *temperature = NULL;
     void *value;
     dict_status status;
@@ -103,7 +103,7 @@ static void my_free(void *ptr, void *ctx) {
 }
 
 /* 在包含 FreeRTOS.h 后使用 */
-RTOS_SYMBOL(dict_config) c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
+DICT_CONFIG_T c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
 c.alloc = my_malloc;
 c.free = my_free;
 c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
@@ -113,7 +113,50 @@ c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
 和桶数组，**不自动复制或分配 key/value**。分配器需提供普通 C 对象所需的对齐，
 失败返回 NULL。`ctx` 会传给全部回调。
 若 key/value 也由用户分配，可配置 `destroy_key/destroy_value` 回收它们。
-ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
+ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，表操作仍需外部串行化。
+
+## SDS / dict / value 共用一个分配器
+
+完整可运行示例见 `examples/shared_allocator.c`。两张独立 dict 使用同一个
+`shared_malloc/shared_free` 和 `&global_memory`；SDS key 与 int value 也用
+同一组回调和 ctx。下面的 wiring 是示例的核心：
+
+```c
+SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, &global_memory};
+DICT_CONFIG_T config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
+config.alloc = allocator.alloc;
+config.free = allocator.free;
+config.ctx = allocator.ctx;
+config.destroy_key = destroy_string; /* 用 SDS_FREE 还原字符串的起始地址 */
+config.destroy_value = shared_free;
+```
+
+公共分配器在每个分配块前保存大小，返回保持对齐的用户指针；free 根据
+块头扣减统计并释放原始地址。因此它统计的不仅有 dict 节点/新旧桶数组，
+还有 SDS 长度头、内容、终止符，以及动态分配的 value。示例的 live_bytes
+包含公共分配器自己的统计头，仍不包含底层 libc 的元数据和对齐开销。
+SDS_FREE 先跳回 SDS 的 int 头，再由 shared_free 跳回公共分配器的头。
+这两层起始地址不同，不能直接对 SDS 内容指针调用 shared_free。
+
+运行：
+
+```sh
+make build/shared_allocator
+./build/shared_allocator
+./build/shared_allocator --test
+```
+
+输出依次显示：两张 dict 加 key/value 的总占用、销毁第一张后剩余占用、
+全部清理后 `0 bytes / 0 blocks`。数值取决于目标 ABI。`--test` 会对每个
+分配点注入一次失败，包括部分 key/value 分配及节点/桶分配，逐次检查总量归零。
+
+这是单线程示例；应用多个任务共用分配器时，计数和底层分配器必须同步。
+`DICT_ENABLE_MEMORY_STATS` 只控制库内节点/桶的诊断统计，不控制示例的自定义
+计数器；两组数据有重叠，不能相加，否则重复计数。判断包含 SDS/value 的
+总占用时使用公共分配器的数据。成功 put 后由析构回调释放 key/value，
+失败时由调用方释放；两张 dict 全部销毁才要求公共总量归零。
+示例自己定义唯一统计对象并含 main，作为独立程序运行；集成回调时不要
+在多个文件重复定义 DICT_MEMORY_STATS_IMPLEMENTATION。
 
 ## 独立字符串头文件 sds.h
 
@@ -146,7 +189,7 @@ ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
 #include "sds.h"
 
 void string_example(void) {
-    RTOS_SYMBOL(sds) s = SDS_NEW("hello", NULL); /* NULL allocator 使用 malloc/free */
+    SDS_T s = SDS_NEW("hello", NULL); /* NULL allocator 使用 malloc/free */
     if (!s) return;
     if (!SDS_APPEND(&s, " world", 6, NULL)) {
         SDS_FREE(s, NULL); /* OOM 时原字符串仍有效 */
@@ -175,6 +218,28 @@ malloc 字符串或子串指针调用。不要直接 `free(s)`，也不要用普
 请求大小，不包含分配器元数据/对齐开销。析构字符串必须使用 sds_free，
 因此示例单独提供 string 析构回调，int value 则使用普通 allocator free。
 
+## 使用宏作为类型
+
+可以：预处理器会把对象式类型宏展开成真正的 typedef 名称，然后编译器
+按普通类型处理。提供的宏自动跟随 RTOS_PREFIX，不需要在变量声明处反复
+写 RTOS_SYMBOL：
+
+```c
+SDS_T key;
+SDS_ALLOCATOR_T allocator;
+DICT_T table;
+DICT_CONFIG_T config;
+DICT_STATUS_T status;
+DICT_MEMORY_STATS_T stats;
+```
+
+例如 `SDS_T` 定义为 `RTOS_SYMBOL(sds)`：默认展开成 sds；前缀为 app_ 时
+展开成 app_sds。也可以用于函数参数、返回类型、指针和强制转换。
+这是 typedef 的宏别名，没有增加存储或运行成本。另提供
+`DICT_HASH_FN_T/DICT_EQUAL_FN_T/DICT_DESTROY_FN_T/DICT_ALLOC_FN_T/DICT_FREE_FN_T/DICT_VISIT_FN_T`
+回调类型，以及 `DICT_ENTRY_T/DICT_TABLE_T`；后两者属于底层结构，应用
+优先使用 DICT_T 操作整个字典。
+
 ## 自定义 C 符号前缀
 
 `include/rtos_namespace.h` 统一控制 dict 和 SDS 的 C 符号名称。默认
@@ -193,7 +258,7 @@ malloc 字符串或子串指针调用。不要直接 `free(s)`，也不要用普
 #include "sds.h"
 
 void example_namespaced_string(void) {
-    RTOS_SYMBOL(sds) s = SDS_NEW("hello", NULL); /* 类型为 app_sds */
+    SDS_T s = SDS_NEW("hello", NULL); /* 类型为 app_sds */
     if (!s) return;
     size_t n = SDS_LEN(s); /* 调用 app_sds_len */
     (void)n;
@@ -202,8 +267,8 @@ void example_namespaced_string(void) {
 ```
 
 前缀覆盖 typedef、struct/enum tag、枚举值、static inline 函数（含内部辅助）、
-全局内存统计对象。类型通过 `RTOS_SYMBOL(dict)`、`RTOS_SYMBOL(dict_config)`、
-`RTOS_SYMBOL(sds)`、`RTOS_SYMBOL(sds_allocator)` 等引用。需要直接调用或取
+全局内存统计对象。类型通过 `DICT_T`、`DICT_CONFIG_T`、
+`SDS_T`、`SDS_ALLOCATOR_T` 等引用。需要直接调用或取
 函数地址时，使用 `RTOS_SYMBOL(sds_len)` 等；默认空前缀时也可直接使用
 `sds_len`。字符串操作推荐统一使用 `SDS_NEW/SDS_LEN/SDS_FREE` 等宏，
 每个参数在展开中只出现一次，参数间仍遵循 C 的求值规则。
@@ -239,7 +304,7 @@ ESP-IDF 示例的共享统计 mux 也带前缀；`app_main` 保留框架要求�
 关闭统计时，不需要上述实现定义；查询仍可调用，返回全零。
 
 ```c
-RTOS_SYMBOL(dict_memory_stats) stats = DICT_MEMORY_STATS_GET();
+DICT_MEMORY_STATS_T stats = DICT_MEMORY_STATS_GET();
 /* stats.live_bytes: 尚未释放的请求字节数
  * stats.live_blocks: 尚未释放的分配块数
  * stats.peak_bytes:  历史最高请求字节数 */
@@ -293,7 +358,7 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 数据结构的内部字段不作为稳定接口，应用应使用公开宏。
 宏包装不增加运行时分配，也不改变节点或字典对象的内存布局。
 
-统一使用 `include/dict.h`、`dict`、`dict_config` 和 `DICT_*`。
+统一使用 `include/dict.h`、`DICT_T`、`DICT_CONFIG_T` 和 `DICT_*`。
 项目级统计开关、实现定义和锁钩子也统一使用 `DICT_*` 名称。
 
 ## API 与所有权
@@ -361,7 +426,7 @@ ctest --test-dir build-cmake --output-on-failure
 `make test` 同时测试统计开/关、跨编译单元共享、默认/自定义分配器混用、
 OOM 回滚、rehash 两张桶表的统计和清理后归零；另用四个 pthread 任务操作
 各自的表，验证共享统计锁。CMake 在支持 Threads 及 GNU/Clang 的主机上也
-运行该并发测试。另验证默认与 demo_ 前缀在同一程序中共存、跨编译单元链接和 SDS 宏参数单次求值。测试强制启用 assert，避免其中的操作被 NDEBUG 去掉。
+运行该并发测试。另验证默认与 demo_ 前缀在同一程序中共存、跨编译单元链接和 SDS 宏参数单次求值。公共分配器示例还验证统计开/关、自定义前缀、所有分配失败点及包含 key/value 的总量归零。测试强制启用 assert，避免其中的操作被 NDEBUG 去掉。
 这些仍是主机测试，不代表 ESP-IDF 5.5.1 或 ESP32-S3 板上验证已完成。
 
 当前工作区没有 CMake，已直接使用 GCC 验证 C99，分别运行优化构建和

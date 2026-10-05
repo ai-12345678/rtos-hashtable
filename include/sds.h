@@ -24,6 +24,10 @@ typedef struct RTOS_SYMBOL(sds_allocator) {
     void *ctx;
 } RTOS_SYMBOL(sds_allocator);
 
+/* Object-like type macros work in declarations, casts and function arguments. */
+#define SDS_T RTOS_SYMBOL(sds)
+#define SDS_ALLOCATOR_T RTOS_SYMBOL(sds_allocator)
+
 /* NULL allocator selects malloc/free; otherwise both callbacks are required.
  * Use the same allocator/context for the entire lifetime of a string. */
 static inline int RTOS_SYMBOL(sds_allocator_valid_impl)(const RTOS_SYMBOL(sds_allocator) *a) {

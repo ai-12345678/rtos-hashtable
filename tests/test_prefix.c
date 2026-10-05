@@ -6,8 +6,8 @@
 extern int prefix_roundtrip(void);
 extern int RTOS_SYMBOL(prefix_roundtrip)(void);
 int main(void) {
-    RTOS_SYMBOL(sds_allocator) allocator = {0};
-    RTOS_SYMBOL(sds) string = SDS_NEW("demo", NULL);
+    SDS_ALLOCATOR_T allocator = {0};
+    SDS_T string = SDS_NEW("demo", NULL);
     (void)allocator;
     assert(string && SDS_LEN(string) == 4);
     assert(prefix_roundtrip() == 0);

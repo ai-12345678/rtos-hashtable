@@ -93,6 +93,20 @@ typedef struct RTOS_SYMBOL(dict_memory_stats) {
     size_t peak_bytes;
 } RTOS_SYMBOL(dict_memory_stats);
 
+/* Public typedef facades automatically follow RTOS_PREFIX. */
+#define DICT_T RTOS_SYMBOL(dict)
+#define DICT_CONFIG_T RTOS_SYMBOL(dict_config)
+#define DICT_STATUS_T RTOS_SYMBOL(dict_status)
+#define DICT_MEMORY_STATS_T RTOS_SYMBOL(dict_memory_stats)
+#define DICT_HASH_FN_T RTOS_SYMBOL(dict_hash_fn)
+#define DICT_EQUAL_FN_T RTOS_SYMBOL(dict_equal_fn)
+#define DICT_DESTROY_FN_T RTOS_SYMBOL(dict_destroy_fn)
+#define DICT_ALLOC_FN_T RTOS_SYMBOL(dict_alloc_fn)
+#define DICT_FREE_FN_T RTOS_SYMBOL(dict_free_fn)
+#define DICT_ENTRY_T RTOS_SYMBOL(dict_entry)
+#define DICT_TABLE_T RTOS_SYMBOL(dict_table)
+#define DICT_VISIT_FN_T RTOS_SYMBOL(dict_visit_fn)
+
 #if DICT_ENABLE_MEMORY_STATS
 #ifdef DICT_MEMORY_STATS_IMPLEMENTATION
 RTOS_SYMBOL(dict_memory_stats) RTOS_SYMBOL(dict_memory_stats_global_impl) = {0, 0, 0};

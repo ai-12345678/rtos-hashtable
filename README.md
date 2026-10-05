@@ -32,6 +32,7 @@ Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象释�
 
 ```c
 #include "dict.h"
+#include "dstr.h"
 
 static void *example_malloc(size_t bytes, void *ctx) {
     (void)ctx;
@@ -41,25 +42,29 @@ static void example_free(void *ptr, void *ctx) {
     (void)ctx;
     free(ptr);
 }
+static void example_destroy_string(void *ptr, void *ctx) {
+    dstr_free((dstr)ptr, (const dstr_allocator *)ctx);
+}
 
 void example(void) {
     dict h;
     dict_config c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
-    char *key = NULL;
+    dstr_allocator strings = {example_malloc, example_free, NULL};
+    dstr key = NULL;
     int *temperature = NULL;
     void *value;
     dict_status status;
 
     c.alloc = example_malloc;
     c.free = example_free;
-    c.destroy_key = example_free;
+    c.ctx = &strings;
+    c.destroy_key = example_destroy_string;
     c.destroy_value = example_free;
 
     if (DICT_INIT(&h, &c) != DICT_OK) return;
-    key = (char *)c.alloc(sizeof("temperature"), c.ctx);
+    key = dstr_new("temperature", &strings);
     temperature = (int *)c.alloc(sizeof(*temperature), c.ctx);
     if (!key || !temperature) goto done;
-    memcpy(key, "temperature", sizeof("temperature"));
     *temperature = 25;
     status = DICT_PUT(&h, key, temperature);
     if (status != DICT_ADDED && status != DICT_REPLACED) goto done;
@@ -70,13 +75,14 @@ void example(void) {
         (void)current;
     }
 done:
-    c.free(key, c.ctx); /* 失败时调用方释放；成功时为 NULL */
+    dstr_free(key, &strings); /* 失败时调用方释放；成功时为 NULL */
     c.free(temperature, c.ctx);
     (void)DICT_DESTROY(&h);
 }
 ```
 
-本例的 key/value 也由自定义 allocator 分配，成功 put 后由析构回调释放，
+本例的 key 使用 dstr，value 为动态分配的 int；都由自定义 allocator 分配，
+成功 put 后由析构回调释放，
 失败时仍由调用方释放。ESP-IDF 示例使用同样的所有权处理，适配
 `heap_caps_malloc/heap_caps_free`。这些用户对象不计入 dict 内部节点/桶的全局统计。
 如果不配置析构回调，默认不释放 key/value，调用方保证对象在条目存活期间有效。
@@ -108,6 +114,66 @@ c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
 失败返回 NULL。`ctx` 会传给全部回调。
 若 key/value 也由用户分配，可配置 `destroy_key/destroy_value` 回收它们。
 ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
+
+## 独立字符串头文件 dstr.h
+
+`include/dstr.h` 不依赖 dict，可单独使用。采用类似 SDS 的分配布局：
+
+| 分配偏移 | 内容 |
+| --- | --- |
+| 0 | `int` 长度头，记录内容的字节数 |
+| `sizeof(int)` | 字符串内容，返回的 `dstr` 指向这里 |
+| `sizeof(int) + length` | 末尾 `\0` |
+
+长度不包含末尾零，也不是 Unicode 字符数量。支持内容中有零字节；
+此时 strlen/strcmp 只能处理首个零之前的部分，需要使用长度或二进制比较。
+这不是 Redis SDS 的完整实现或二进制兼容布局，没有额外容量字段；
+复制和拼接按最终大小重新分配，不提供摊销 O(1) 的追加性能。
+
+| API | 行为 |
+| --- | --- |
+| `dstr_new(text, allocator)` | 从 NUL 结尾字符串创建 |
+| `dstr_new_len(bytes, length, allocator)` | 从指定字节数创建，允许内部零；NULL/0 创建空串 |
+| `dstr_len(s)` | O(1) 读取长度；NULL 返回 0 |
+| `dstr_alloc_size(s)` | 请求分配大小：头部＋长度＋1；NULL 返回 0 |
+| `dstr_dup(s, allocator)` | 复制 dstr，保留内部零 |
+| `dstr_copy(&s, bytes, length, allocator)` | 替换内容；成功返回 1，失败保留原指针 |
+| `dstr_append(&s, bytes, length, allocator)` | 拼接内容；成功返回 1，失败保留原指针 |
+| `dstr_compare(a, b)` | 按完整字节内容比较，返回负/零/正；NULL 视为空串 |
+| `dstr_free(s, allocator)` | 还原分配起始地址后释放；NULL 安全 |
+
+```c
+#include "dstr.h"
+
+void string_example(void) {
+    dstr s = dstr_new("hello", NULL); /* NULL allocator 使用 malloc/free */
+    if (!s) return;
+    if (!dstr_append(&s, " world", 6, NULL)) {
+        dstr_free(s, NULL); /* OOM 时原字符串仍有效 */
+        return;
+    }
+    size_t len = dstr_len(s);          /* 11 */
+    size_t bytes = dstr_alloc_size(s); /* sizeof(int) + 11 + 1 */
+    (void)len; (void)bytes;
+    dstr_free(s, NULL);
+}
+```
+
+自定义 allocator 使用 `dstr_allocator {alloc, free, ctx}`，回调必须成对，
+并在创建、复制/拼接、释放期间保持同一组分配器和有效 ctx。allocator 的请求
+包含完整长度头和终止符，方便在用户的回调中统计分配总量。
+超过 `INT_MAX`、分配大小溢出或 OOM 返回失败。
+
+只允许对 dstr 创建的指针调用长度/释放函数；不能对普通字面量、普通
+malloc 字符串或子串指针调用。不要直接 `free(s)`，也不要用普通 C 字符串
+操作改变长度，否则头部信息不再正确。成功复制/拼接会使旧指针失效，
+支持源数据位于旧字符串中的情况。key 入 dict 后不得修改或重新分配。
+使用现有 DICT_HASH_STRING/DICT_EQUAL_STRING 时，key 应避免内部零；
+二进制 key 需另配 hash/equal 回调。
+
+调用方的 dstr 分配仍不计入 dict 节点/桶的全局计数；`dstr_alloc_size` 是
+请求大小，不包含分配器元数据/对齐开销。析构字符串必须使用 dstr_free，
+因此示例单独提供 string 析构回调，int value 则使用普通 allocator free。
 
 ## 全局内存统计（可关闭）
 

@@ -1,5 +1,10 @@
 #define DICT_MEMORY_STATS_IMPLEMENTATION
 #include "dict.h"
+#include "dstr.h"
+
+dstr dict_other_string(void) {
+    return dstr_new("other-tu", NULL);
+}
 int dict_other_translation_unit(void) {
     dict h;
     dict_config c = dict_config_default(dict_hash_string, dict_equal_string);

@@ -5,6 +5,7 @@
 #include "esp_idf_dict_config.h"
 #define DICT_MEMORY_STATS_IMPLEMENTATION
 #include "dict.h"
+#include "dstr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
@@ -20,31 +21,35 @@ static void idf_free(void *ptr, void *ctx) {
     (void)ctx;
     heap_caps_free(ptr);
 }
+static void idf_destroy_string(void *ptr, void *ctx) {
+    dstr_free((dstr)ptr, (const dstr_allocator *)ctx);
+}
 void app_main(void) {
     dict sensors;
     dict_config config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
-    char *key = NULL;
+    dstr_allocator strings = {idf_malloc, idf_free, NULL};
+    dstr key = NULL;
     int *temperature = NULL;
     void *value = NULL;
     dict_status status;
     config.alloc = idf_malloc;
     config.free = idf_free;
-    config.destroy_key = idf_free;
+    config.ctx = &strings;
+    config.destroy_key = idf_destroy_string;
     config.destroy_value = idf_free;
     status = DICT_INIT(&sensors, &config);
     if (status != DICT_OK) return;
     /* Preallocate buckets. Nodes still use the custom allocator per insert. */
     status = DICT_RESERVE(&sensors, 16);
     if (status != DICT_OK) goto done;
-    /* User objects use the same custom allocator and ctx as internal storage.
+    /* User objects use the same custom allocator callbacks as internal storage.
      * They remain caller-owned until put succeeds. */
-    key = (char *)config.alloc(sizeof("temperature"), config.ctx);
+    key = dstr_new("temperature", &strings);
     temperature = (int *)config.alloc(sizeof(*temperature), config.ctx);
     if (!key || !temperature) {
         status = DICT_OOM;
         goto done;
     }
-    memcpy(key, "temperature", sizeof("temperature"));
     *temperature = 25;
     status = DICT_PUT(&sensors, key, temperature);
     if (status != DICT_ADDED && status != DICT_REPLACED) goto done;
@@ -56,7 +61,7 @@ void app_main(void) {
 done:
     /* NULL after successful transfer; otherwise release caller-owned objects,
      * including partial allocation or insertion failures. */
-    config.free(key, config.ctx);
+    dstr_free(key, &strings);
     config.free(temperature, config.ctx);
     if (status < 0) ESP_LOGE("dict", "Operation failed: %d", (int)status);
     status = DICT_DESTROY(&sensors);

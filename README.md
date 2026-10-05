@@ -151,15 +151,12 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 传入配置，也可以直接调用。操作宏本身不能取函数地址；需要回调的 API
 继续通过配置结构中的函数指针提供，不依赖操作宏。
 
-旧版 `dict_init(...)` 等调用形式保留为兼容宏。实现函数 `dict_*_impl` 和
+`dict_init(...)` 等小写调用形式作为便捷宏保留。实现函数 `dict_*_impl` 和
 数据结构的内部字段不作为稳定接口，应用应使用公开宏。
 宏包装不增加运行时分配，也不改变节点或字典对象的内存布局。
 
-新代码使用 `include/dict.h`、`dict`、`dict_config` 和 `DICT_*`。
-原 `include/fht.h`、`fht`、`fht_config`、`FHT_*` 及旧小写调用保留为兼容层，
-委托到同一 dict 实现，不创建第二份存储或统计对象。旧项目级
-`FHT_ENABLE_MEMORY_STATS` / `FHT_MEMORY_STATS_IMPLEMENTATION` / 统计锁宏也保留；
-若同时设置新旧统计开关，值必须一致。
+统一使用 `include/dict.h`、`dict`、`dict_config` 和 `DICT_*`。
+项目级统计开关、实现定义和锁钩子也统一使用 `DICT_*` 名称。
 
 ## API 与所有权
 
@@ -214,7 +211,7 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 make test
 make sanitize
 # 也可使用 CMake
-cmake -S . -B build-cmake -DFHT_SANITIZE=ON
+cmake -S . -B build-cmake -DDICT_SANITIZE=ON
 cmake --build build-cmake
 ctest --test-dir build-cmake --output-on-failure
 ```

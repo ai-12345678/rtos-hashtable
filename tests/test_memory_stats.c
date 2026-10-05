@@ -2,9 +2,9 @@
 #include <assert.h>
 #include <stdio.h>
 
-extern int fht_other_table_create(void);
-extern int fht_other_table_destroy(void);
-extern dict_memory_stats fht_other_memory_stats(void);
+extern int dict_other_table_create(void);
+extern int dict_other_table_destroy(void);
+extern dict_memory_stats dict_other_memory_stats(void);
 
 typedef struct allocator {
     size_t attempts, fail_at, bytes, blocks;
@@ -39,7 +39,7 @@ static void expect(size_t bytes, size_t blocks) {
 #if DICT_ENABLE_MEMORY_STATS
     assert(s.live_bytes == bytes && s.live_blocks == blocks);
     assert(s.peak_bytes >= s.live_bytes);
-    assert(fht_other_memory_stats().live_bytes == bytes);
+    assert(dict_other_memory_stats().live_bytes == bytes);
 #else
     (void)bytes; (void)blocks;
     assert(s.live_bytes == 0 && s.live_blocks == 0 && s.peak_bytes == 0);
@@ -68,7 +68,7 @@ static void test_shared_tables(void) {
     assert(DICT_MEMORY_STATS_RESET() == DICT_OK);
     assert(DICT_INIT(&h, &c) == DICT_OK);
     expect(0, 0);
-    assert(fht_other_table_create() == 0);
+    assert(dict_other_table_create() == 0);
     expect(other_bytes, 2);
     assert(DICT_RESERVE(&h, 8) == DICT_OK);
     expect(other_bytes + a.bytes, 2 + a.blocks);
@@ -85,7 +85,7 @@ static void test_shared_tables(void) {
     assert(DICT_CLEAR(&h) == DICT_OK && a.bytes == 0 && a.blocks == 0);
     expect(other_bytes, 2);
     assert(DICT_DESTROY(&h) == DICT_OK);
-    assert(fht_other_table_destroy() == 0);
+    assert(dict_other_table_destroy() == 0);
     expect(0, 0);
 #if DICT_ENABLE_MEMORY_STATS
     assert(DICT_MEMORY_STATS_GET().peak_bytes != 0);

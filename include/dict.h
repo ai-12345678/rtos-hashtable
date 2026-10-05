@@ -11,24 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Accept legacy configuration names so FHT and DICT users share one setting. */
-#if defined(FHT_ENABLE_MEMORY_STATS) && !defined(DICT_ENABLE_MEMORY_STATS)
-#define DICT_ENABLE_MEMORY_STATS FHT_ENABLE_MEMORY_STATS
-#endif
-#if defined(FHT_ENABLE_MEMORY_STATS) && defined(DICT_ENABLE_MEMORY_STATS) && \
-    FHT_ENABLE_MEMORY_STATS != DICT_ENABLE_MEMORY_STATS
-#error "FHT and DICT memory statistics switches must match"
-#endif
-#if defined(FHT_MEMORY_STATS_IMPLEMENTATION) && !defined(DICT_MEMORY_STATS_IMPLEMENTATION)
-#define DICT_MEMORY_STATS_IMPLEMENTATION
-#endif
-#if defined(FHT_MEMORY_STATS_LOCK) && !defined(DICT_MEMORY_STATS_LOCK)
-#define DICT_MEMORY_STATS_LOCK() FHT_MEMORY_STATS_LOCK()
-#endif
-#if defined(FHT_MEMORY_STATS_UNLOCK) && !defined(DICT_MEMORY_STATS_UNLOCK)
-#define DICT_MEMORY_STATS_UNLOCK() FHT_MEMORY_STATS_UNLOCK()
-#endif
-
 /* Set identically in every translation unit. Disabled builds have no global
  * storage or accounting. Enabled builds define DICT_MEMORY_STATS_IMPLEMENTATION
  * in exactly one translation unit before including this header. */

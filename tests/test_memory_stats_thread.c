@@ -4,8 +4,8 @@
 #include <stdio.h>
 
 static pthread_mutex_t stats_mutex = PTHREAD_MUTEX_INITIALIZER;
-void fht_test_stats_lock(void) { assert(pthread_mutex_lock(&stats_mutex) == 0); }
-void fht_test_stats_unlock(void) { assert(pthread_mutex_unlock(&stats_mutex) == 0); }
+void dict_test_stats_lock(void) { assert(pthread_mutex_lock(&stats_mutex) == 0); }
+void dict_test_stats_unlock(void) { assert(pthread_mutex_unlock(&stats_mutex) == 0); }
 /* These queries would deadlock if callbacks ran under the counter lock. */
 static void *thread_alloc(size_t n, void *ctx) {
     (void)ctx; (void)DICT_MEMORY_STATS_GET(); return malloc(n);

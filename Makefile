@@ -5,7 +5,8 @@ SOURCES = tests/test_dict.c tests/other_tu.c
 
 .PHONY: test sanitize clean
 
-test: build/dict_test_release build/dict_test_stats build/dict_memory_off build/dict_memory_on build/dict_memory_thread build/sds_test build/prefix_test build/shared_allocator build/shared_allocator_off build/shared_allocator_prefix
+test: build/dict_copy_test build/dict_test_release build/dict_test_stats build/dict_memory_off build/dict_memory_on build/dict_memory_thread build/sds_test build/prefix_test build/shared_allocator build/shared_allocator_off build/shared_allocator_prefix
+	./build/dict_copy_test
 	./build/dict_test_release
 	./build/dict_test_stats
 	./build/dict_memory_off
@@ -16,6 +17,10 @@ test: build/dict_test_release build/dict_test_stats build/dict_memory_off build/
 	./build/shared_allocator --test
 	./build/shared_allocator_off --test
 	./build/shared_allocator_prefix --test
+
+build/dict_copy_test: tests/test_dict_copy.c tests/other_tu.c include/dict.h include/sds.h include/rtos_namespace.h
+	mkdir -p build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -UNDEBUG -DDICT_ENABLE_MEMORY_STATS=1 tests/test_dict_copy.c tests/other_tu.c -o $@
 
 build/shared_allocator: examples/shared_allocator.c include/dict.h include/sds.h include/rtos_namespace.h
 	mkdir -p build
@@ -66,6 +71,8 @@ build/dict_memory_thread: tests/test_memory_stats_thread.c tests/other_tu.c test
 
 sanitize:
 	mkdir -p build
+	$(CC) $(CPPFLAGS) -std=c99 -g -Wall -Wextra -Wpedantic -Werror -UNDEBUG -DDICT_ENABLE_MEMORY_STATS=1 -fsanitize=address,undefined -fno-omit-frame-pointer tests/test_dict_copy.c tests/other_tu.c -o build/dict_copy_sanitize
+	./build/dict_copy_sanitize
 	$(CC) $(CPPFLAGS) -std=c99 -g -Wall -Wextra -Wpedantic -Werror -UNDEBUG -fsanitize=address,undefined -fno-omit-frame-pointer $(SOURCES) -o build/dict_test_sanitize
 	./build/dict_test_sanitize
 	$(CC) $(CPPFLAGS) -std=c99 -g -Wall -Wextra -Wpedantic -Werror -UNDEBUG -DDICT_ENABLE_MEMORY_STATS=1 -fsanitize=address,undefined -fno-omit-frame-pointer $(SOURCES) -o build/dict_test_stats_sanitize

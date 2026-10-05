@@ -9,18 +9,18 @@
 对外通过 `DICT_*` 宏调用，具体实现使用 `dict_*_impl` 内联函数。
 
 参考 Redis dict 的链式冲突处理和双表渐进式 rehash，自行实现，并非移植
-Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象释放回调。
+Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象复制和释放回调。
 
 ## 内存设计
 
-节点只存三个指针：`next / key / value`，不缓存 hash，不复制 key/value。
+节点只存三个指针：`next / key / value`，不缓存 hash；复制模式的 key/value 独立分配。
 在常见 ESP32 32 位 ABI 下，节点为 **12 字节**，每个桶 **4 字节**，
-表对象约 **64 字节**。上述数字按类型布局计算，未在 ESP32 设备上实测；
+表对象约 **72 字节**。上述数字按类型布局计算，未在 ESP32 设备上实测；
 不包含分配器的块头、对齐浪费和用户对象。可用 `sizeof(dict_entry)`、
 `sizeof(dict)` 在实际编译目标上确认。
 
-正常运行时，表自身占用约为 `64 + 12 × 节点数 + 4 × 桶数` 字节。
-例如 100 条记录、128 个桶约 1776 字节。rehash 期间同时保留旧、新桶数组，
+正常运行时，表自身占用约为 `72 + 12 × 节点数 + 4 × 桶数` 字节。
+例如 100 条记录、128 个桶约 1784 字节。rehash 期间同时保留旧、新桶数组，
 **不复制节点**；从 128 桶扩展到 256 桶时，额外占用 1024 字节。
 
 容量取不小于请求值的 2 的幂，最少 4 个桶。默认负载达到 1 后扩容；
@@ -46,6 +46,15 @@ static void example_destroy_string(void *ptr, void *ctx) {
     SDS_FREE((SDS_T)ptr, (const SDS_ALLOCATOR_T *)ctx);
 }
 
+static void *example_copy_string(const void *ptr, void *ctx) {
+    return SDS_DUP((const char *)ptr, (const SDS_ALLOCATOR_T *)ctx);
+}
+static void *example_copy_int(const void *ptr, void *ctx) {
+    int *copy = (int *)example_malloc(sizeof(*copy), ctx);
+    if (copy) *copy = *(const int *)ptr;
+    return copy;
+}
+
 void example(void) {
     DICT_T h;
     DICT_CONFIG_T c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
@@ -53,27 +62,32 @@ void example(void) {
     SDS_T key = NULL;
     int *temperature = NULL;
     void *value;
-    dict_status status;
+    DICT_STATUS_T status;
 
     c.alloc = example_malloc;
     c.free = example_free;
     c.ctx = &strings;
     c.destroy_key = example_destroy_string;
     c.destroy_value = example_free;
+    c.copy_key = example_copy_string;
+    c.copy_value = example_copy_int;
 
     if (DICT_INIT(&h, &c) != DICT_OK) return;
     key = SDS_NEW("temperature", &strings);
     temperature = (int *)c.alloc(sizeof(*temperature), c.ctx);
     if (!key || !temperature) goto done;
     *temperature = 25;
-    status = DICT_PUT(&h, key, temperature);
+    status = DICT_PUT_COPY(&h, key, temperature);
     if (status != DICT_ADDED && status != DICT_REPLACED) goto done;
-    key = NULL; /* 成功后交由 dict 的析构回调释放 */
+    SDS_FREE(key, &strings); /* 输入仍归调用方；dict 已保存独立副本 */
+    c.free(temperature, c.ctx);
+    key = NULL;
     temperature = NULL;
     if (DICT_GET(&h, "temperature", &value)) {
         int current = *(int *)value;
         (void)current;
     }
+    (void)DICT_REMOVE(&h, "temperature"); /* 释放 dict 内的 key/value 副本 */
 done:
     SDS_FREE(key, &strings); /* 失败时调用方释放；成功时为 NULL */
     c.free(temperature, c.ctx);
@@ -82,8 +96,8 @@ done:
 ```
 
 本例的 key 使用 sds，value 为动态分配的 int；都由自定义 allocator 分配，
-成功 put 后由析构回调释放，
-失败时仍由调用方释放。ESP-IDF 示例使用同样的所有权处理，适配
+写入时复制 key/value，输入在成功或失败后都由调用方释放。
+删除、替换、清空或销毁 dict 时，析构回调释放 dict 内部的副本。ESP-IDF 示例使用同样的所有权处理，适配
 `heap_caps_malloc/heap_caps_free`。这些用户对象不计入 dict 内部节点/桶的全局统计。
 如果不配置析构回调，默认不释放 key/value，调用方保证对象在条目存活期间有效。
 key 的哈希和比较结果必须保持不变。字符串辅助函数需要非 NULL、
@@ -110,7 +124,12 @@ c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
 ```
 
 `alloc/free` 必须同时配置；省略时使用标准 `malloc/free`。它们管理节点
-和桶数组，**不自动复制或分配 key/value**。分配器需提供普通 C 对象所需的对齐，
+和桶数组。配置成对的 `copy_key/copy_value` 和 `destroy_key/destroy_value`
+后，`DICT_PUT` 和 `DICT_PUT_COPY` 都复制 key/value；输入始终归调用方。
+复制回调必须返回独立的堆对象，并保持 key 的哈希与比较结果。
+`DICT_PUT_COPY` 未配置复制回调时返回 `DICT_INVALID`。
+未配置复制回调的 `DICT_PUT` 保留原有借用/所有权转移行为，
+示例统一使用复制模式。分配器需提供普通 C 对象所需的对齐，
 失败返回 NULL。`ctx` 会传给全部回调。
 若 key/value 也由用户分配，可配置 `destroy_key/destroy_value` 回收它们。
 ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，表操作仍需外部串行化。
@@ -119,7 +138,8 @@ ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，表操作仍需�
 
 完整可运行示例见 `examples/shared_allocator.c`。两张独立 dict 使用同一个
 `shared_malloc/shared_free` 和 `&global_memory`；SDS key 与 int value 也用
-同一组回调和 ctx。下面的 wiring 是示例的核心：
+同一组回调和 ctx。输入 k-v 在堆上创建，写入时复制，随后释放输入；
+dict 持有的两份独立副本在删除时释放。下面的 wiring 是示例的核心：
 
 ```c
 SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, &global_memory};
@@ -129,6 +149,8 @@ config.free = allocator.free;
 config.ctx = allocator.ctx;
 config.destroy_key = destroy_string; /* 用 SDS_FREE 还原字符串的起始地址 */
 config.destroy_value = shared_free;
+config.copy_key = copy_string;
+config.copy_value = copy_int;
 ```
 
 公共分配器在每个分配块前保存大小，返回保持对齐的用户指针；free 根据
@@ -148,7 +170,7 @@ make build/shared_allocator
 
 输出依次显示：两张 dict 加 key/value 的总占用、销毁第一张后剩余占用、
 全部清理后 `0 bytes / 0 blocks`。数值取决于目标 ABI。`--test` 会对每个
-分配点注入一次失败，包括部分 key/value 分配及节点/桶分配，逐次检查总量归零。
+分配点注入一次失败，包括输入和副本的 key/value 分配及节点/桶分配，逐次检查总量归零。
 
 这是单线程示例；应用多个任务共用分配器时，计数和底层分配器必须同步。
 `DICT_ENABLE_MEMORY_STATS` 只控制库内节点/桶的诊断统计，不控制示例的自定义
@@ -236,7 +258,7 @@ DICT_MEMORY_STATS_T stats;
 例如 `SDS_T` 定义为 `RTOS_SYMBOL(sds)`：默认展开成 sds；前缀为 app_ 时
 展开成 app_sds。也可以用于函数参数、返回类型、指针和强制转换。
 这是 typedef 的宏别名，没有增加存储或运行成本。另提供
-`DICT_HASH_FN_T/DICT_EQUAL_FN_T/DICT_DESTROY_FN_T/DICT_ALLOC_FN_T/DICT_FREE_FN_T/DICT_VISIT_FN_T`
+`DICT_HASH_FN_T/DICT_EQUAL_FN_T/DICT_DESTROY_FN_T/DICT_COPY_FN_T/DICT_ALLOC_FN_T/DICT_FREE_FN_T/DICT_VISIT_FN_T`
 回调类型，以及 `DICT_ENTRY_T/DICT_TABLE_T`；后两者属于底层结构，应用
 优先使用 DICT_T 操作整个字典。
 
@@ -313,7 +335,7 @@ DICT_MEMORY_STATS_T stats = DICT_MEMORY_STATS_GET();
 统计覆盖默认和自定义 `alloc/free` 分配的**节点、桶数组**，包括 rehash
 期间的新旧桶数组和 OOM 回滚释放。内部释放路径已知对应分配的大小，
 因此无需给每块内存加统计头，也不改变自定义分配器收到的大小和指针。
-节点/表结构布局保持不变。统计不是实际堆占用：不包含 allocator 元数据、
+计数不会增加节点/表的布局开销。统计不是实际堆占用：不包含 allocator 元数据、
 对齐开销、栈或静态的 `dict` 对象、调用方分配的 key/value，以及内存池预留空间。
 析构回调释放的 key/value 也不进入这组计数，需由调用方另行检查。
 
@@ -366,7 +388,8 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 | API | 行为 |
 | --- | --- |
 | `DICT_INIT` | 初始化未初始化或已销毁对象；不分配内存 |
-| `DICT_PUT` | 新增返回 `DICT_ADDED`；相同键替换返回 `DICT_REPLACED` |
+| `DICT_PUT_COPY` | 配置复制/析构回调后复制输入；失败回收部分副本，输入始终归调用方 |
+| `DICT_PUT` | 配置复制回调时同 `DICT_PUT_COPY`；新增返回 `DICT_ADDED`；相同键替换返回 `DICT_REPLACED` |
 | `DICT_GET` | 找到返回 1，未找到返回 0；输出借用的 value |
 | `DICT_REMOVE` | 删除并调用配置的对象析构回调 |
 | `DICT_TAKE` | 删除但不析构，将 key/value 所有权交给调用方 |
@@ -378,8 +401,12 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 | `DICT_CLEAR` | 释放全部存储，保留配置，可继续插入 |
 | `DICT_DESTROY` | 释放并清零；再次使用前需要 init |
 
-配置析构回调后，成功 put 的 key/value 由表负责释放；失败仍由调用方负责。
-替换时同时采用新的 key 和 value，释放原来的对象；对应指针未变则不释放。
+复制模式要求同时配置两个复制回调和两个析构回调，否则 init 返回 `DICT_INVALID`。
+写入成功后 dict 持有独立副本，输入始终由调用方释放；失败释放部分副本，
+已有条目不变。NULL value 直接保存 NULL，不调用 value 复制回调。
+未配置复制回调时，配置析构回调的 put 成功后转移输入对象所有权，失败仍归调用方；
+未配置析构回调时则借用输入对象。示例统一采用复制模式。
+替换释放旧副本；借用/转移模式的替换同时采用新 key/value，对应指针未变则不释放。
 不同所有权对象之间不得共享同一地址，尤其不要把同一个需要释放的对象
 同时作为 key/value。`take` 要求两个非 NULL 且不同的输出地址。
 
@@ -419,7 +446,7 @@ cmake --build build-cmake
 ctest --test-dir build-cmake --output-on-failure
 ```
 
-测试覆盖多编译单元链接、字符串/整数键、NULL value、所有权转移与释放、
+测试覆盖多编译单元链接、字符串/整数键、NULL value、复制模式与所有权转移、替换及删除/销毁释放、
 逐个注入分配失败、全碰撞长链、单节点迁移预算、遍历期间修改保护，
 以及 20 万次对照模型随机操作。
 

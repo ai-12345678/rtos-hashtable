@@ -57,7 +57,16 @@ static void destroy_string(void *ptr, void *ctx) {
      * recovers its own header. Never shared_free the SDS content pointer. */
     SDS_FREE((SDS_T)ptr, &allocator);
 }
-static int put_owned(DICT_T *d, const char *text, int number, memory_tracker *t) {
+static void *copy_string(const void *ptr, void *ctx) {
+    SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, ctx};
+    return SDS_DUP((const char *)ptr, &allocator);
+}
+static void *copy_int(const void *ptr, void *ctx) {
+    int *copy = (int *)shared_malloc(sizeof(*copy), ctx);
+    if (copy) *copy = *(const int *)ptr;
+    return copy;
+}
+static int put_copied(DICT_T *d, const char *text, int number, memory_tracker *t) {
     SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, t};
     SDS_T key = SDS_NEW(text, &allocator);
     int *value = (int *)shared_malloc(sizeof(*value), t);
@@ -68,13 +77,14 @@ static int put_owned(DICT_T *d, const char *text, int number, memory_tracker *t)
         return 0;
     }
     *value = number;
-    status = DICT_PUT(d, key, value);
+    status = DICT_PUT_COPY(d, key, value);
+    /* Source objects always stay caller-owned; dict owns only the copies. */
+    SDS_FREE(key, &allocator);
+    shared_free(value, t);
     if (status != DICT_ADDED && status != DICT_REPLACED) {
-        SDS_FREE(key, &allocator);
-        shared_free(value, t);
         return 0;
     }
-    return 1; /* Both objects now belong to the dict's destructors. */
+    return 1;
 }
 static int run_demo(size_t fail_at, int verbose) {
     DICT_T first, second;
@@ -89,17 +99,22 @@ static int run_demo(size_t fail_at, int verbose) {
     config.ctx = &global_memory; /* Same ctx as the SDS allocator and int value. */
     config.destroy_key = destroy_string;
     config.destroy_value = shared_free;
+    config.copy_key = copy_string;
+    config.copy_value = copy_int;
     if (DICT_INIT(&first, &config) != DICT_OK) goto done;
     first_ready = 1;
     if (DICT_INIT(&second, &config) != DICT_OK) goto done;
     second_ready = 1;
     if (DICT_RESERVE(&first, 4) != DICT_OK || DICT_RESERVE(&second, 4) != DICT_OK) goto done;
-    if (!put_owned(&first, "temperature", 25, &global_memory) ||
-        !put_owned(&second, "humidity", 60, &global_memory)) goto done;
+    if (!put_copied(&first, "temperature", 25, &global_memory) ||
+        !put_copied(&second, "humidity", 60, &global_memory)) goto done;
     if (!DICT_GET(&first, "temperature", &value) || *(int *)value != 25) goto done;
     if (verbose)
         printf("Two dicts + SDS keys + values: %zu bytes / %zu blocks\n",
                global_memory.live_bytes, global_memory.live_blocks);
+    /* REMOVE frees the stored key/value copies and node; buckets remain. */
+    if (DICT_REMOVE(&first, "temperature") != DICT_OK) goto done;
+    assert(!DICT_GET(&first, "temperature", &value));
     if (DICT_DESTROY(&first) != DICT_OK) goto done;
     first_ready = 0;
     assert(global_memory.live_bytes && global_memory.live_blocks); /* second lives */

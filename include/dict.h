@@ -36,6 +36,7 @@ extern "C" {
 typedef uint32_t (*RTOS_SYMBOL(dict_hash_fn))(const void *key, void *ctx);
 typedef int (*RTOS_SYMBOL(dict_equal_fn))(const void *a, const void *b, void *ctx);
 typedef void (*RTOS_SYMBOL(dict_destroy_fn))(void *object, void *ctx);
+typedef void *(*RTOS_SYMBOL(dict_copy_fn))(const void *object, void *ctx);
 typedef void *(*RTOS_SYMBOL(dict_alloc_fn))(size_t bytes, void *ctx);
 typedef void (*RTOS_SYMBOL(dict_free_fn))(void *ptr, void *ctx);
 
@@ -59,6 +60,8 @@ typedef struct RTOS_SYMBOL(dict_config) {
     RTOS_SYMBOL(dict_equal_fn) equal;
     RTOS_SYMBOL(dict_destroy_fn) destroy_key;
     RTOS_SYMBOL(dict_destroy_fn) destroy_value;
+    RTOS_SYMBOL(dict_copy_fn) copy_key; /* both copy callbacks + destructors required */
+    RTOS_SYMBOL(dict_copy_fn) copy_value;
     RTOS_SYMBOL(dict_alloc_fn) alloc;           /* alloc/free must both be set, or both NULL */
     RTOS_SYMBOL(dict_free_fn) free;
     void *ctx;                    /* passed to every callback */
@@ -101,6 +104,7 @@ typedef struct RTOS_SYMBOL(dict_memory_stats) {
 #define DICT_HASH_FN_T RTOS_SYMBOL(dict_hash_fn)
 #define DICT_EQUAL_FN_T RTOS_SYMBOL(dict_equal_fn)
 #define DICT_DESTROY_FN_T RTOS_SYMBOL(dict_destroy_fn)
+#define DICT_COPY_FN_T RTOS_SYMBOL(dict_copy_fn)
 #define DICT_ALLOC_FN_T RTOS_SYMBOL(dict_alloc_fn)
 #define DICT_FREE_FN_T RTOS_SYMBOL(dict_free_fn)
 #define DICT_ENTRY_T RTOS_SYMBOL(dict_entry)
@@ -204,7 +208,10 @@ static inline RTOS_SYMBOL(dict_config) RTOS_SYMBOL(dict_config_default_impl)(RTO
 /* Initialize an uninitialized or destroyed object; no allocation occurs. */
 static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_init_impl)(RTOS_SYMBOL(dict) *h, const RTOS_SYMBOL(dict_config) *config) {
     if (!h || !config || !config->hash || !config->equal ||
-        (!!config->alloc != !!config->free)) return DICT_INVALID;
+        (!!config->alloc != !!config->free) ||
+        (!!config->copy_key != !!config->copy_value) ||
+        (config->copy_key && (!config->destroy_key || !config->destroy_value)))
+        return DICT_INVALID;
     memset(h, 0, sizeof(*h));
     h->config = *config;
     if (!h->config.alloc) {
@@ -315,7 +322,7 @@ static inline int RTOS_SYMBOL(dict_get_impl)(RTOS_SYMBOL(dict) *h, const void *k
  * ownership stays with caller. Replacement adopts BOTH new key and value,
  * destroying old objects unless their corresponding pointers are unchanged.
  * Key/value ownership must be independent (no aliases between owned objects). */
-static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_impl)(RTOS_SYMBOL(dict) *h, void *key, void *value) {
+static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_owned_impl)(RTOS_SYMBOL(dict) *h, void *key, void *value) {
     uint32_t hash;
     RTOS_SYMBOL(dict_entry) **link, *e;
     RTOS_SYMBOL(dict_table) *t;
@@ -355,6 +362,41 @@ static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_impl)(RTOS_SYMBOL(di
     t->buckets[bucket] = e;
     ++t->used;
     return DICT_ADDED;
+}
+/* Copy mode: input objects always remain caller-owned. Copies must be distinct
+ * allocations and preserve key hash/equality; callbacks must not reenter h.
+ * Non-NULL key required. NULL value is stored directly (no copy callback).
+ * On any error, destroy the partial copies; existing entries stay unchanged. */
+static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_copy_impl)(RTOS_SYMBOL(dict) *h,
+                                        const void *key, const void *value) {
+    void *copied_key, *copied_value = NULL;
+    RTOS_SYMBOL(dict_status) status;
+    if (!h || !key || !h->config.copy_key || !h->config.copy_value ||
+        !h->config.destroy_key || !h->config.destroy_value) return DICT_INVALID;
+    if (h->visiting) return DICT_BUSY;
+    copied_key = h->config.copy_key(key, h->config.ctx);
+    if (!copied_key) return DICT_OOM;
+    if (value) {
+        copied_value = h->config.copy_value(value, h->config.ctx);
+        if (!copied_value) {
+            h->config.destroy_key(copied_key, h->config.ctx);
+            return DICT_OOM;
+        }
+    }
+    status = RTOS_SYMBOL(dict_put_owned_impl)(h, copied_key, copied_value);
+    if (status != DICT_ADDED && status != DICT_REPLACED) {
+        h->config.destroy_key(copied_key, h->config.ctx);
+        h->config.destroy_value(copied_value, h->config.ctx);
+    }
+    return status;
+}
+/* Configured copy mode also applies to normal PUT. Without copy callbacks,
+ * retain the original ownership-transfer/borrowing contract. */
+static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_impl)(RTOS_SYMBOL(dict) *h,
+                                        void *key, void *value) {
+    if (h->config.copy_key || h->config.copy_value)
+        return RTOS_SYMBOL(dict_put_copy_impl)(h, key, value);
+    return RTOS_SYMBOL(dict_put_owned_impl)(h, key, value);
 }
 static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_remove_entry_impl)(RTOS_SYMBOL(dict) *h, const void *key,
                                       void **out_key, void **out_value,
@@ -483,6 +525,8 @@ static inline int RTOS_SYMBOL(dict_equal_string_impl)(const void *a, const void 
     (RTOS_SYMBOL(dict_get_impl)((table), (key), (out_value)))
 #define DICT_PUT(table, key, value) \
     (RTOS_SYMBOL(dict_put_impl)((table), (key), (value)))
+#define DICT_PUT_COPY(table, key, value) \
+    (RTOS_SYMBOL(dict_put_copy_impl)((table), (key), (value)))
 #define DICT_REMOVE(table, key) \
     (RTOS_SYMBOL(dict_remove_impl)((table), (key)))
 #define DICT_TAKE(table, key, out_key, out_value) \
@@ -517,6 +561,8 @@ static inline int RTOS_SYMBOL(dict_equal_string_impl)(const void *a, const void 
     DICT_GET((table), (key), (out_value))
 #define dict_put(table, key, value) \
     DICT_PUT((table), (key), (value))
+#define dict_put_copy(table, key, value) \
+    DICT_PUT_COPY((table), (key), (value))
 #define dict_remove(table, key) \
     DICT_REMOVE((table), (key))
 #define dict_take(table, key, out_key, out_value) \

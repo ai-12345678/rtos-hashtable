@@ -4,7 +4,7 @@
 正常情况下只使用 `tables[0]`；扩容时分配 `tables[1]` 的桶数组，逐步迁移节点。
 查找和删除检查两张表，新条目进入新表。迁移完成后释放旧桶并切换回单表。
 
-纯 C99，无外部依赖，无内置锁。只需复制 `include/dict.h`，所有函数均为
+纯 C99，无外部依赖，无内置锁。复制 `include/dict.h` 和 `include/rtos_namespace.h`，所有函数均为
 `static inline`，可在多个 C 编译单元中包含，不需要单独编译库。
 对外通过 `DICT_*` 宏调用，具体实现使用 `dict_*_impl` 内联函数。
 
@@ -32,7 +32,7 @@ Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象释�
 
 ```c
 #include "dict.h"
-#include "dstr.h"
+#include "sds.h"
 
 static void *example_malloc(size_t bytes, void *ctx) {
     (void)ctx;
@@ -43,14 +43,14 @@ static void example_free(void *ptr, void *ctx) {
     free(ptr);
 }
 static void example_destroy_string(void *ptr, void *ctx) {
-    dstr_free((dstr)ptr, (const dstr_allocator *)ctx);
+    SDS_FREE((RTOS_SYMBOL(sds))ptr, (const RTOS_SYMBOL(sds_allocator) *)ctx);
 }
 
 void example(void) {
-    dict h;
-    dict_config c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
-    dstr_allocator strings = {example_malloc, example_free, NULL};
-    dstr key = NULL;
+    RTOS_SYMBOL(dict) h;
+    RTOS_SYMBOL(dict_config) c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
+    RTOS_SYMBOL(sds_allocator) strings = {example_malloc, example_free, NULL};
+    RTOS_SYMBOL(sds) key = NULL;
     int *temperature = NULL;
     void *value;
     dict_status status;
@@ -62,7 +62,7 @@ void example(void) {
     c.destroy_value = example_free;
 
     if (DICT_INIT(&h, &c) != DICT_OK) return;
-    key = dstr_new("temperature", &strings);
+    key = SDS_NEW("temperature", &strings);
     temperature = (int *)c.alloc(sizeof(*temperature), c.ctx);
     if (!key || !temperature) goto done;
     *temperature = 25;
@@ -75,13 +75,13 @@ void example(void) {
         (void)current;
     }
 done:
-    dstr_free(key, &strings); /* 失败时调用方释放；成功时为 NULL */
+    SDS_FREE(key, &strings); /* 失败时调用方释放；成功时为 NULL */
     c.free(temperature, c.ctx);
     (void)DICT_DESTROY(&h);
 }
 ```
 
-本例的 key 使用 dstr，value 为动态分配的 int；都由自定义 allocator 分配，
+本例的 key 使用 sds，value 为动态分配的 int；都由自定义 allocator 分配，
 成功 put 后由析构回调释放，
 失败时仍由调用方释放。ESP-IDF 示例使用同样的所有权处理，适配
 `heap_caps_malloc/heap_caps_free`。这些用户对象不计入 dict 内部节点/桶的全局统计。
@@ -103,7 +103,7 @@ static void my_free(void *ptr, void *ctx) {
 }
 
 /* 在包含 FreeRTOS.h 后使用 */
-dict_config c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
+RTOS_SYMBOL(dict_config) c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
 c.alloc = my_malloc;
 c.free = my_free;
 c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
@@ -115,14 +115,14 @@ c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
 若 key/value 也由用户分配，可配置 `destroy_key/destroy_value` 回收它们。
 ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
 
-## 独立字符串头文件 dstr.h
+## 独立字符串头文件 sds.h
 
-`include/dstr.h` 不依赖 dict，可单独使用。采用类似 SDS 的分配布局：
+`include/sds.h` 不依赖 dict，可与 `include/rtos_namespace.h` 一起单独使用。采用类似 SDS 的分配布局：
 
 | 分配偏移 | 内容 |
 | --- | --- |
 | 0 | `int` 长度头，记录内容的字节数 |
-| `sizeof(int)` | 字符串内容，返回的 `dstr` 指向这里 |
+| `sizeof(int)` | 字符串内容，返回的 `sds` 指向这里 |
 | `sizeof(int) + length` | 末尾 `\0` |
 
 长度不包含末尾零，也不是 Unicode 字符数量。支持内容中有零字节；
@@ -132,48 +132,92 @@ ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，没有锁。
 
 | API | 行为 |
 | --- | --- |
-| `dstr_new(text, allocator)` | 从 NUL 结尾字符串创建 |
-| `dstr_new_len(bytes, length, allocator)` | 从指定字节数创建，允许内部零；NULL/0 创建空串 |
-| `dstr_len(s)` | O(1) 读取长度；NULL 返回 0 |
-| `dstr_alloc_size(s)` | 请求分配大小：头部＋长度＋1；NULL 返回 0 |
-| `dstr_dup(s, allocator)` | 复制 dstr，保留内部零 |
-| `dstr_copy(&s, bytes, length, allocator)` | 替换内容；成功返回 1，失败保留原指针 |
-| `dstr_append(&s, bytes, length, allocator)` | 拼接内容；成功返回 1，失败保留原指针 |
-| `dstr_compare(a, b)` | 按完整字节内容比较，返回负/零/正；NULL 视为空串 |
-| `dstr_free(s, allocator)` | 还原分配起始地址后释放；NULL 安全 |
+| `SDS_NEW(text, allocator)` | 从 NUL 结尾字符串创建 |
+| `SDS_NEW_LEN(bytes, length, allocator)` | 从指定字节数创建，允许内部零；NULL/0 创建空串 |
+| `SDS_LEN(s)` | O(1) 读取长度；NULL 返回 0 |
+| `SDS_ALLOC_SIZE(s)` | 请求分配大小：头部＋长度＋1；NULL 返回 0 |
+| `SDS_DUP(s, allocator)` | 复制 sds，保留内部零 |
+| `SDS_COPY(&s, bytes, length, allocator)` | 替换内容；成功返回 1，失败保留原指针 |
+| `SDS_APPEND(&s, bytes, length, allocator)` | 拼接内容；成功返回 1，失败保留原指针 |
+| `SDS_COMPARE(a, b)` | 按完整字节内容比较，返回负/零/正；NULL 视为空串 |
+| `SDS_FREE(s, allocator)` | 还原分配起始地址后释放；NULL 安全 |
 
 ```c
-#include "dstr.h"
+#include "sds.h"
 
 void string_example(void) {
-    dstr s = dstr_new("hello", NULL); /* NULL allocator 使用 malloc/free */
+    RTOS_SYMBOL(sds) s = SDS_NEW("hello", NULL); /* NULL allocator 使用 malloc/free */
     if (!s) return;
-    if (!dstr_append(&s, " world", 6, NULL)) {
-        dstr_free(s, NULL); /* OOM 时原字符串仍有效 */
+    if (!SDS_APPEND(&s, " world", 6, NULL)) {
+        SDS_FREE(s, NULL); /* OOM 时原字符串仍有效 */
         return;
     }
-    size_t len = dstr_len(s);          /* 11 */
-    size_t bytes = dstr_alloc_size(s); /* sizeof(int) + 11 + 1 */
+    size_t len = SDS_LEN(s);          /* 11 */
+    size_t bytes = SDS_ALLOC_SIZE(s); /* sizeof(int) + 11 + 1 */
     (void)len; (void)bytes;
-    dstr_free(s, NULL);
+    SDS_FREE(s, NULL);
 }
 ```
 
-自定义 allocator 使用 `dstr_allocator {alloc, free, ctx}`，回调必须成对，
+自定义 allocator 使用 `sds_allocator {alloc, free, ctx}`，回调必须成对，
 并在创建、复制/拼接、释放期间保持同一组分配器和有效 ctx。allocator 的请求
 包含完整长度头和终止符，方便在用户的回调中统计分配总量。
 超过 `INT_MAX`、分配大小溢出或 OOM 返回失败。
 
-只允许对 dstr 创建的指针调用长度/释放函数；不能对普通字面量、普通
+只允许对 sds 创建的指针调用长度/释放函数；不能对普通字面量、普通
 malloc 字符串或子串指针调用。不要直接 `free(s)`，也不要用普通 C 字符串
 操作改变长度，否则头部信息不再正确。成功复制/拼接会使旧指针失效，
 支持源数据位于旧字符串中的情况。key 入 dict 后不得修改或重新分配。
 使用现有 DICT_HASH_STRING/DICT_EQUAL_STRING 时，key 应避免内部零；
 二进制 key 需另配 hash/equal 回调。
 
-调用方的 dstr 分配仍不计入 dict 节点/桶的全局计数；`dstr_alloc_size` 是
-请求大小，不包含分配器元数据/对齐开销。析构字符串必须使用 dstr_free，
+调用方的 sds 分配仍不计入 dict 节点/桶的全局计数；`sds_alloc_size` 是
+请求大小，不包含分配器元数据/对齐开销。析构字符串必须使用 sds_free，
 因此示例单独提供 string 析构回调，int value 则使用普通 allocator free。
+
+## 自定义 C 符号前缀
+
+`include/rtos_namespace.h` 统一控制 dict 和 SDS 的 C 符号名称。默认
+`RTOS_PREFIX` 是空宏，不是字符串字面量 `""`，默认名称为 `dict`、
+`sds`、`sds_len` 等。项目所有编译单元可以统一添加：
+
+```sh
+-DRTOS_PREFIX=app_
+```
+
+也可以在任何库头文件之前，通过一个公共配置头定义：
+
+```c
+#define RTOS_PREFIX app_
+#include "dict.h"
+#include "sds.h"
+
+void example_namespaced_string(void) {
+    RTOS_SYMBOL(sds) s = SDS_NEW("hello", NULL); /* 类型为 app_sds */
+    if (!s) return;
+    size_t n = SDS_LEN(s); /* 调用 app_sds_len */
+    (void)n;
+    SDS_FREE(s, NULL);
+}
+```
+
+前缀覆盖 typedef、struct/enum tag、枚举值、static inline 函数（含内部辅助）、
+全局内存统计对象。类型通过 `RTOS_SYMBOL(dict)`、`RTOS_SYMBOL(dict_config)`、
+`RTOS_SYMBOL(sds)`、`RTOS_SYMBOL(sds_allocator)` 等引用。需要直接调用或取
+函数地址时，使用 `RTOS_SYMBOL(sds_len)` 等；默认空前缀时也可直接使用
+`sds_len`。字符串操作推荐统一使用 `SDS_NEW/SDS_LEN/SDS_FREE` 等宏，
+每个参数在展开中只出现一次，参数间仍遵循 C 的求值规则。
+
+`DICT_*` / `SDS_*` 调用宏、配置宏、头文件保护宏及 RTOS 命名空间宏的名称
+保持固定，内部转发到所选前缀；标准 C 预处理器不能动态拼接 #define 的宏名。
+枚举值请通过 `DICT_OK/DICT_OOM` 等调用层名称引用，不再套 RTOS_SYMBOL。
+不要在包含头文件后改变前缀。同一个实例的所有编译单元必须配置同一前缀，
+包含唯一全局统计对象的实现文件也必须一致，否则会链接失败或分属不同实例。
+不同前缀可以在不同编译单元中构建并链接到同一个程序；各自的统计对象独立，
+同一前缀内所有 dict 共享统计。一个编译单元只支持一种前缀。
+
+ESP-IDF 示例的共享统计 mux 也带前缀；`app_main` 保留框架要求的固定名称。
+库本身不为调用方的回调或应用业务符号自动添加前缀。
 
 ## 全局内存统计（可关闭）
 
@@ -195,7 +239,7 @@ malloc 字符串或子串指针调用。不要直接 `free(s)`，也不要用普
 关闭统计时，不需要上述实现定义；查询仍可调用，返回全零。
 
 ```c
-dict_memory_stats stats = DICT_MEMORY_STATS_GET();
+RTOS_SYMBOL(dict_memory_stats) stats = DICT_MEMORY_STATS_GET();
 /* stats.live_bytes: 尚未释放的请求字节数
  * stats.live_blocks: 尚未释放的分配块数
  * stats.peak_bytes:  历史最高请求字节数 */
@@ -317,7 +361,7 @@ ctest --test-dir build-cmake --output-on-failure
 `make test` 同时测试统计开/关、跨编译单元共享、默认/自定义分配器混用、
 OOM 回滚、rehash 两张桶表的统计和清理后归零；另用四个 pthread 任务操作
 各自的表，验证共享统计锁。CMake 在支持 Threads 及 GNU/Clang 的主机上也
-运行该并发测试。测试强制启用 assert，避免其中的操作被 NDEBUG 去掉。
+运行该并发测试。另验证默认与 demo_ 前缀在同一程序中共存、跨编译单元链接和 SDS 宏参数单次求值。测试强制启用 assert，避免其中的操作被 NDEBUG 去掉。
 这些仍是主机测试，不代表 ESP-IDF 5.5.1 或 ESP32-S3 板上验证已完成。
 
 当前工作区没有 CMake，已直接使用 GCC 验证 C99，分别运行优化构建和

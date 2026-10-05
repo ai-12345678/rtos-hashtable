@@ -1,16 +1,16 @@
 /* Pure C, table operations have no built-in locks. Call from a single task (or serialize externally).
  * Copy into an ESP-IDF component; add ../include to INCLUDE_DIRS.
  * Table access still needs external serialization; the stats mux only protects
- * shared accounting. Include esp_idf_dict_config.h before dict.h in all TUs. */
+ * shared accounting. Include esp_idf_dict_config.h before RTOS_SYMBOL(dict).h in all TUs. */
 #include "esp_idf_dict_config.h"
 #define DICT_MEMORY_STATS_IMPLEMENTATION
 #include "dict.h"
-#include "dstr.h"
+#include "sds.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #if DICT_ENABLE_MEMORY_STATS
-portMUX_TYPE dict_stats_mux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE RTOS_SYMBOL(dict_stats_mux) = portMUX_INITIALIZER_UNLOCKED;
 #endif
 
 static void *idf_malloc(size_t bytes, void *ctx) {
@@ -22,16 +22,16 @@ static void idf_free(void *ptr, void *ctx) {
     heap_caps_free(ptr);
 }
 static void idf_destroy_string(void *ptr, void *ctx) {
-    dstr_free((dstr)ptr, (const dstr_allocator *)ctx);
+    SDS_FREE((RTOS_SYMBOL(sds))ptr, (const RTOS_SYMBOL(sds_allocator) *)ctx);
 }
 void app_main(void) {
-    dict sensors;
-    dict_config config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
-    dstr_allocator strings = {idf_malloc, idf_free, NULL};
-    dstr key = NULL;
+    RTOS_SYMBOL(dict) sensors;
+    RTOS_SYMBOL(dict_config) config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
+    RTOS_SYMBOL(sds_allocator) strings = {idf_malloc, idf_free, NULL};
+    RTOS_SYMBOL(sds) key = NULL;
     int *temperature = NULL;
     void *value = NULL;
-    dict_status status;
+    RTOS_SYMBOL(dict_status) status;
     config.alloc = idf_malloc;
     config.free = idf_free;
     config.ctx = &strings;
@@ -44,7 +44,7 @@ void app_main(void) {
     if (status != DICT_OK) goto done;
     /* User objects use the same custom allocator callbacks as internal storage.
      * They remain caller-owned until put succeeds. */
-    key = dstr_new("temperature", &strings);
+    key = SDS_NEW("temperature", &strings);
     temperature = (int *)config.alloc(sizeof(*temperature), config.ctx);
     if (!key || !temperature) {
         status = DICT_OOM;
@@ -61,12 +61,12 @@ void app_main(void) {
 done:
     /* NULL after successful transfer; otherwise release caller-owned objects,
      * including partial allocation or insertion failures. */
-    dstr_free(key, &strings);
+    SDS_FREE(key, &strings);
     config.free(temperature, config.ctx);
     if (status < 0) ESP_LOGE("dict", "Operation failed: %d", (int)status);
     status = DICT_DESTROY(&sensors);
     if (status == DICT_OK) {
-        dict_memory_stats stats = DICT_MEMORY_STATS_GET();
+        RTOS_SYMBOL(dict_memory_stats) stats = DICT_MEMORY_STATS_GET();
         ESP_LOGI("dict", "global live=%u bytes/%u blocks, peak=%u bytes",
                  (unsigned)stats.live_bytes, (unsigned)stats.live_blocks,
                  (unsigned)stats.peak_bytes);

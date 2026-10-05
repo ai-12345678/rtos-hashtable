@@ -1,9 +1,9 @@
 #define DICT_MEMORY_STATS_IMPLEMENTATION
 #include "dict.h"
-#include "dstr.h"
+#include "sds.h"
 
-dstr dict_other_string(void) {
-    return dstr_new("other-tu", NULL);
+sds dict_other_string(void) {
+    return SDS_NEW("other-tu", NULL);
 }
 int dict_other_translation_unit(void) {
     dict h;

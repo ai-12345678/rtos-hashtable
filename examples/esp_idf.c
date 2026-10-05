@@ -21,32 +21,17 @@ static void idf_free(void *ptr, void *ctx) {
     (void)ctx;
     heap_caps_free(ptr);
 }
-static void idf_destroy_string(void *ptr, void *ctx) {
-    SDS_FREE((SDS_T)ptr, (const SDS_ALLOCATOR_T *)ctx);
-}
-static void *idf_copy_string(const void *ptr, void *ctx) {
-    return SDS_DUP((const char *)ptr, (const SDS_ALLOCATOR_T *)ctx);
-}
-static void *idf_copy_int(const void *ptr, void *ctx) {
-    int *copy = (int *)idf_malloc(sizeof(*copy), ctx);
-    if (copy) *copy = *(const int *)ptr;
-    return copy;
-}
 void app_main(void) {
     DICT_T sensors;
     DICT_CONFIG_T config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
     SDS_ALLOCATOR_T strings = {idf_malloc, idf_free, NULL};
     SDS_T key = NULL;
-    int *temperature = NULL;
+    SDS_T temperature = NULL;
     void *value = NULL;
     DICT_STATUS_T status;
     config.alloc = idf_malloc;
     config.free = idf_free;
     config.ctx = &strings;
-    config.destroy_key = idf_destroy_string;
-    config.destroy_value = idf_free;
-    config.copy_key = idf_copy_string;
-    config.copy_value = idf_copy_int;
     status = DICT_INIT(&sensors, &config);
     if (status != DICT_OK) return;
     /* Preallocate buckets. Nodes still use the custom allocator per insert. */
@@ -55,27 +40,26 @@ void app_main(void) {
     /* User objects use the same custom allocator callbacks as internal storage.
      * Source objects remain caller-owned even after copying succeeds. */
     key = SDS_NEW("temperature", &strings);
-    temperature = (int *)config.alloc(sizeof(*temperature), config.ctx);
+    temperature = SDS_NEW("25", &strings);
     if (!key || !temperature) {
         status = DICT_OOM;
         goto done;
     }
-    *temperature = 25;
-    status = DICT_PUT(&sensors, key, temperature);
+    status = DICT_PUT_SDS(&sensors, key, temperature);
     if (status != DICT_ADDED && status != DICT_REPLACED) goto done;
     /* Dict owns independent heap copies; release both input objects now. */
     SDS_FREE(key, &strings);
-    config.free(temperature, config.ctx);
+    SDS_FREE(temperature, &strings);
     key = NULL;
     temperature = NULL;
     if (DICT_GET(&sensors, "temperature", &value))
-        ESP_LOGI("dict", "temperature=%d", *(int *)value);
+        ESP_LOGI("dict", "temperature=%s", (const char *)value);
     status = DICT_REMOVE(&sensors, "temperature"); /* frees both stored copies */
 done:
     /* NULL after successful input cleanup; otherwise release caller-owned objects,
      * including partial allocation or insertion failures. */
     SDS_FREE(key, &strings);
-    config.free(temperature, config.ctx);
+    SDS_FREE(temperature, &strings);
     if (status < 0) ESP_LOGE("dict", "Operation failed: %d", (int)status);
     status = DICT_DESTROY(&sensors);
     if (status == DICT_OK) {

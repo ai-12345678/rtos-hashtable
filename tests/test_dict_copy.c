@@ -39,7 +39,7 @@ static int busy_visit(const void *key, void *value, void *ctx) {
     visit_context *v = (visit_context *)ctx;
     size_t attempts = v->t->attempts;
     (void)key; (void)value;
-    assert(DICT_PUT(v->d, v->key, v->value) == DICT_BUSY);
+    assert(RTOS_SYMBOL(dict_put_copy_impl)(v->d, v->key, v->value) == DICT_BUSY);
     assert(v->t->attempts == attempts);
     return 0;
 }
@@ -58,7 +58,7 @@ int main(void) {
     *input = 25;
     c.alloc = allocate; c.free = release; c.ctx = &t;
     assert(DICT_INIT(&d, &c) == DICT_OK);
-    assert(DICT_PUT(&d, key, input) == DICT_INVALID);
+    assert(RTOS_SYMBOL(dict_put_copy_impl)(&d, key, input) == DICT_INVALID);
     assert(DICT_DESTROY(&d) == DICT_OK);
     c.copy_key = copy_key; c.copy_value = copy_value;
     c.destroy_key = destroy_key; c.destroy_value = destroy_value;
@@ -70,7 +70,7 @@ int main(void) {
     /* Fail key clone, value clone, node, then initial bucket allocation. */
     for (n = 1; n <= 4; ++n) {
         t.fail_at = t.attempts + n;
-        assert(DICT_PUT(&d, key, input) == DICT_OOM);
+        assert(RTOS_SYMBOL(dict_put_copy_impl)(&d, key, input) == DICT_OOM);
         assert(DICT_SIZE(&d) == 0 && t.live == 2);
         assert(strcmp(key, "sensor") == 0 && *input == 25);
     }
@@ -79,7 +79,7 @@ int main(void) {
         DICT_T *table = &d;
         SDS_T *key_ptr = &key;
         int **value_ptr = &input;
-        assert(DICT_PUT(table++, *key_ptr++, *value_ptr++) == DICT_ADDED);
+        assert(RTOS_SYMBOL(dict_put_copy_impl)(table++, *key_ptr++, *value_ptr++) == DICT_ADDED);
         assert(table == &d + 1 && key_ptr == &key + 1 && value_ptr == &input + 1);
     } /* each macro argument is evaluated once; inputs remain caller-owned */
     assert(DICT_GET(&d, "sensor", &stored));
@@ -87,13 +87,13 @@ int main(void) {
     *input = 26;
     for (n = 1; n <= 2; ++n) {
         t.fail_at = t.attempts + n;
-        assert(DICT_PUT(&d, key, input) == DICT_OOM);
+        assert(RTOS_SYMBOL(dict_put_copy_impl)(&d, key, input) == DICT_OOM);
         assert(DICT_GET(&d, "sensor", &stored) && *(int *)stored == 25);
         assert(t.live == 6); /* two inputs + two copies + node + buckets */
     }
     t.fail_at = 0;
     n = t.keys;
-    assert(DICT_PUT(&d, key, input) == DICT_REPLACED);
+    assert(RTOS_SYMBOL(dict_put_copy_impl)(&d, key, input) == DICT_REPLACED);
     assert(t.keys == n + 1 && t.live == 6);
     visit.d = &d; visit.key = key; visit.value = input; visit.t = &t;
     assert(DICT_FOREACH(&d, busy_visit, &visit) == DICT_OK);
@@ -104,7 +104,7 @@ int main(void) {
     assert(t.values == n + 1 && t.live == 1); /* bucket array is retained */
     assert(!DICT_GET(&d, "sensor", &stored));
     key = SDS_NEW("nullable", &a);
-    assert(DICT_PUT(&d, key, NULL) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_copy_impl)(&d, key, NULL) == DICT_ADDED);
     SDS_FREE(key, &a);
     assert(DICT_GET(&d, "nullable", &stored) && stored == NULL);
     assert(DICT_TAKE(&d, "nullable", &taken_key, &taken_value) == DICT_OK);
@@ -112,7 +112,7 @@ int main(void) {
     destroy_key(taken_key, &t); destroy_value(taken_value, &t);
     key = SDS_NEW("final", &a);
     input = (int *)allocate(sizeof(*input), &t); assert(key && input); *input = 7;
-    assert(DICT_PUT(&d, key, input) == DICT_ADDED);
+    assert(RTOS_SYMBOL(dict_put_copy_impl)(&d, key, input) == DICT_ADDED);
     SDS_FREE(key, &a); release(input, &t);
     assert(DICT_DESTROY(&d) == DICT_OK && t.live == 0);
     assert(DICT_MEMORY_STATS_GET().live_bytes == 0);

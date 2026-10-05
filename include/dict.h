@@ -8,6 +8,7 @@
  * Keys must retain a stable hash/equality while stored. */
 #include <stddef.h>
 #include "rtos_namespace.h"
+#include "sds.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,9 +59,9 @@ typedef enum RTOS_SYMBOL(dict_status) {
 typedef struct RTOS_SYMBOL(dict_config) {
     RTOS_SYMBOL(dict_hash_fn) hash;
     RTOS_SYMBOL(dict_equal_fn) equal;
-    RTOS_SYMBOL(dict_destroy_fn) destroy_key;
+    RTOS_SYMBOL(dict_destroy_fn) destroy_key; /* internal generic engine only */
     RTOS_SYMBOL(dict_destroy_fn) destroy_value;
-    RTOS_SYMBOL(dict_copy_fn) copy_key; /* both copy callbacks + destructors required */
+    RTOS_SYMBOL(dict_copy_fn) copy_key; /* internal generic engine: pair with destructors */
     RTOS_SYMBOL(dict_copy_fn) copy_value;
     RTOS_SYMBOL(dict_alloc_fn) alloc;           /* alloc/free must both be set, or both NULL */
     RTOS_SYMBOL(dict_free_fn) free;
@@ -86,6 +87,7 @@ typedef struct RTOS_SYMBOL(dict) {
     RTOS_SYMBOL(dict_table) tables[2];
     size_t rehash_index;
     unsigned visiting;
+    unsigned string_storage; /* public string writes own SDS key/value */
 } RTOS_SYMBOL(dict);
 
 /* Requested bytes for nodes and bucket arrays only, excluding user objects,
@@ -318,6 +320,18 @@ static inline int RTOS_SYMBOL(dict_get_impl)(RTOS_SYMBOL(dict) *h, const void *k
     if (value) *value = link ? (*link)->value : NULL;
     return link != NULL;
 }
+/* String objects use the same allocator/ctx as nodes and buckets, but do not
+ * enter the internal node/bucket accounting counters. */
+static inline void RTOS_SYMBOL(dict_destroy_object_impl)(RTOS_SYMBOL(dict) *h,
+                                        void *ptr, int is_key) {
+    if (h->string_storage) {
+        RTOS_SYMBOL(sds_allocator) a = {h->config.alloc, h->config.free, h->config.ctx};
+        RTOS_SYMBOL(sds_free)((RTOS_SYMBOL(sds))ptr, &a);
+    } else {
+        RTOS_SYMBOL(dict_destroy_fn) destroy = is_key ? h->config.destroy_key : h->config.destroy_value;
+        if (destroy) destroy(ptr, h->config.ctx);
+    }
+}
 /* On success table owns key/value per configured destructors. On error
  * ownership stays with caller. Replacement adopts BOTH new key and value,
  * destroying old objects unless their corresponding pointers are unchanged.
@@ -334,10 +348,8 @@ static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_owned_impl)(RTOS_SYM
     link = RTOS_SYMBOL(dict_find_impl)(h, key, hash, NULL);
     if (link) {
         e = *link;
-        if (e->key != key && h->config.destroy_key)
-            h->config.destroy_key(e->key, h->config.ctx);
-        if (e->value != value && h->config.destroy_value)
-            h->config.destroy_value(e->value, h->config.ctx);
+        if (e->key != key) RTOS_SYMBOL(dict_destroy_object_impl)(h, e->key, 1);
+        if (e->value != value) RTOS_SYMBOL(dict_destroy_object_impl)(h, e->value, 0);
         e->key = key;
         e->value = value;
         return DICT_REPLACED;
@@ -390,6 +402,43 @@ static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_copy_impl)(RTOS_SYMB
     }
     return status;
 }
+/* Both public string APIs store independent SDS objects. Ordinary C strings
+ * are scanned to NUL; SDS input uses its length header (including binary data).
+ * Do not mix custom object ownership callbacks with this automatic mode. */
+static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_put_strings_impl)(RTOS_SYMBOL(dict) *h,
+                                      const char *key, const char *value, int sds_input) {
+    RTOS_SYMBOL(sds_allocator) a;
+    RTOS_SYMBOL(sds) copied_key, copied_value = NULL;
+    RTOS_SYMBOL(dict_status) status;
+    size_t key_length, value_length;
+    if (!h || !key || !h->config.alloc || !h->config.free ||
+        h->config.copy_key || h->config.copy_value ||
+        h->config.destroy_key || h->config.destroy_value ||
+        (!h->string_storage && RTOS_SYMBOL(dict_size_impl)(h))) return DICT_INVALID;
+    if (h->visiting) return DICT_BUSY;
+    key_length = sds_input ? RTOS_SYMBOL(sds_len)(key) : strlen(key);
+    value_length = value ? (sds_input ? RTOS_SYMBOL(sds_len)(value) : strlen(value)) : 0;
+    if (key_length > INT_MAX || value_length > INT_MAX ||
+        key_length > SIZE_MAX - sizeof(int) - 1 ||
+        value_length > SIZE_MAX - sizeof(int) - 1) return DICT_OVERFLOW;
+    a.alloc = h->config.alloc; a.free = h->config.free; a.ctx = h->config.ctx;
+    copied_key = RTOS_SYMBOL(sds_new_len)(key, key_length, &a);
+    if (!copied_key) return DICT_OOM;
+    if (value) {
+        copied_value = RTOS_SYMBOL(sds_new_len)(value, value_length, &a);
+        if (!copied_value) {
+            RTOS_SYMBOL(sds_free)(copied_key, &a);
+            return DICT_OOM;
+        }
+    }
+    h->string_storage = 1;
+    status = RTOS_SYMBOL(dict_put_owned_impl)(h, copied_key, copied_value);
+    if (status != DICT_ADDED && status != DICT_REPLACED) {
+        RTOS_SYMBOL(sds_free)(copied_key, &a);
+        RTOS_SYMBOL(sds_free)(copied_value, &a);
+    }
+    return status;
+}
 static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_remove_entry_impl)(RTOS_SYMBOL(dict) *h, const void *key,
                                       void **out_key, void **out_value,
                                       int take) {
@@ -408,8 +457,8 @@ static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_remove_entry_impl)(RTOS_
         if (out_key) *out_key = e->key;
         if (out_value) *out_value = e->value;
     } else {
-        if (h->config.destroy_key) h->config.destroy_key(e->key, h->config.ctx);
-        if (h->config.destroy_value) h->config.destroy_value(e->value, h->config.ctx);
+        RTOS_SYMBOL(dict_destroy_object_impl)(h, e->key, 1);
+        RTOS_SYMBOL(dict_destroy_object_impl)(h, e->value, 0);
     }
     RTOS_SYMBOL(dict_free_bytes_impl)(h, e, sizeof(*e));
     RTOS_SYMBOL(dict_finish_rehash_impl)(h);
@@ -459,10 +508,8 @@ static inline RTOS_SYMBOL(dict_status) RTOS_SYMBOL(dict_clear_impl)(RTOS_SYMBOL(
             RTOS_SYMBOL(dict_entry) *e = h->tables[i].buckets[b];
             while (e) {
                 RTOS_SYMBOL(dict_entry) *next = e->next;
-                if (h->config.destroy_key)
-                    h->config.destroy_key(e->key, h->config.ctx);
-                if (h->config.destroy_value)
-                    h->config.destroy_value(e->value, h->config.ctx);
+                RTOS_SYMBOL(dict_destroy_object_impl)(h, e->key, 1);
+                RTOS_SYMBOL(dict_destroy_object_impl)(h, e->value, 0);
                 RTOS_SYMBOL(dict_free_bytes_impl)(h, e, sizeof(*e));
                 e = next;
             }
@@ -515,9 +562,11 @@ static inline int RTOS_SYMBOL(dict_equal_string_impl)(const void *a, const void 
     (RTOS_SYMBOL(dict_reserve_impl)((table), (entries)))
 #define DICT_GET(table, key, out_value) \
     (RTOS_SYMBOL(dict_get_impl)((table), (key), (out_value)))
-/* The sole public insertion macro always copies; input ownership never moves. */
+/* Both arguments must be ordinary C strings, or SDS for PUT_SDS. */
 #define DICT_PUT(table, key, value) \
-    (RTOS_SYMBOL(dict_put_copy_impl)((table), (key), (value)))
+    (RTOS_SYMBOL(dict_put_strings_impl)((table), (key), (value), 0))
+#define DICT_PUT_SDS(table, key, value) \
+    (RTOS_SYMBOL(dict_put_strings_impl)((table), (key), (value), 1))
 #define DICT_REMOVE(table, key) \
     (RTOS_SYMBOL(dict_remove_impl)((table), (key)))
 #define DICT_TAKE(table, key, out_key, out_value) \

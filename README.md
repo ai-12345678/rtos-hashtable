@@ -4,23 +4,23 @@
 正常情况下只使用 `tables[0]`；扩容时分配 `tables[1]` 的桶数组，逐步迁移节点。
 查找和删除检查两张表，新条目进入新表。迁移完成后释放旧桶并切换回单表。
 
-纯 C99，无外部依赖，无内置锁。复制 `include/dict.h` 和 `include/rtos_namespace.h`，所有函数均为
+纯 C99，无外部依赖，无内置锁。复制 `include/dict.h`、`include/sds.h` 和 `include/rtos_namespace.h`，所有函数均为
 `static inline`，可在多个 C 编译单元中包含，不需要单独编译库。
 对外通过 `DICT_PUT` 和其他 `DICT_*` 宏调用，具体实现使用 `dict_*_impl` 内联函数。
 
 参考 Redis dict 的链式冲突处理和双表渐进式 rehash，自行实现，并非移植
-Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象复制和释放回调。
+Redis 源码。支持自定义 malloc/free、键哈希/比较，自动复制和释放字符串 key/value。
 
 ## 内存设计
 
 节点只存三个指针：`next / key / value`，不缓存 hash；复制模式的 key/value 独立分配。
 在常见 ESP32 32 位 ABI 下，节点为 **12 字节**，每个桶 **4 字节**，
-表对象约 **72 字节**。上述数字按类型布局计算，未在 ESP32 设备上实测；
+表对象约 **76 字节**。上述数字按类型布局计算，未在 ESP32 设备上实测；
 不包含分配器的块头、对齐浪费和用户对象。可用 `sizeof(dict_entry)`、
 `sizeof(dict)` 在实际编译目标上确认。
 
-正常运行时，表自身占用约为 `72 + 12 × 节点数 + 4 × 桶数` 字节。
-例如 100 条记录、128 个桶约 1784 字节。rehash 期间同时保留旧、新桶数组，
+正常运行时，表自身占用约为 `76 + 12 × 节点数 + 4 × 桶数` 字节。
+例如 100 条记录、128 个桶约 1788 字节。rehash 期间同时保留旧、新桶数组，
 **不复制节点**；从 128 桶扩展到 256 桶时，额外占用 1024 字节。
 
 容量取不小于请求值的 2 的幂，最少 4 个桶。默认负载达到 1 后扩容；
@@ -28,11 +28,13 @@ Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象复�
 `reserve` 可在启动阶段预分配桶，减少运行中的扩容。
 它不会预分配节点；如需避免节点分配抖动，可接入自己的内存池分配器。
 
-## 最小用法
+## 最小用法：普通 char* key/value
+
+`DICT_PUT` 接收两个以 NUL 结尾的 `const char *`，自动复制为内部 SDS，
+无需配置复制或析构回调。输入始终归调用方。以下输入均在堆上分配：
 
 ```c
-#include "dict.h"
-#include "sds.h"
+#include "dict.h" /* 同时包含 sds.h */
 
 static void *example_malloc(size_t bytes, void *ctx) {
     (void)ctx;
@@ -42,67 +44,63 @@ static void example_free(void *ptr, void *ctx) {
     (void)ctx;
     free(ptr);
 }
-static void example_destroy_string(void *ptr, void *ctx) {
-    SDS_FREE((SDS_T)ptr, (const SDS_ALLOCATOR_T *)ctx);
-}
-
-static void *example_copy_string(const void *ptr, void *ctx) {
-    return SDS_DUP((const char *)ptr, (const SDS_ALLOCATOR_T *)ctx);
-}
-static void *example_copy_int(const void *ptr, void *ctx) {
-    int *copy = (int *)example_malloc(sizeof(*copy), ctx);
-    if (copy) *copy = *(const int *)ptr;
-    return copy;
-}
 
 void example(void) {
-    DICT_T h;
-    DICT_CONFIG_T c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
-    SDS_ALLOCATOR_T strings = {example_malloc, example_free, NULL};
-    SDS_T key = NULL;
-    int *temperature = NULL;
-    void *value;
+    DICT_T table;
+    DICT_CONFIG_T config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
+    char *key = NULL, *value = NULL;
+    void *stored;
     DICT_STATUS_T status;
-
-    c.alloc = example_malloc;
-    c.free = example_free;
-    c.ctx = &strings;
-    c.destroy_key = example_destroy_string;
-    c.destroy_value = example_free;
-    c.copy_key = example_copy_string;
-    c.copy_value = example_copy_int;
-
-    if (DICT_INIT(&h, &c) != DICT_OK) return;
-    key = SDS_NEW("temperature", &strings);
-    temperature = (int *)c.alloc(sizeof(*temperature), c.ctx);
-    if (!key || !temperature) goto done;
-    *temperature = 25;
-    status = DICT_PUT(&h, key, temperature);
+    config.alloc = example_malloc;
+    config.free = example_free;
+    if (DICT_INIT(&table, &config) != DICT_OK) return;
+    key = (char *)config.alloc(sizeof("temperature"), config.ctx);
+    value = (char *)config.alloc(sizeof("25"), config.ctx);
+    if (!key || !value) goto done;
+    strcpy(key, "temperature");
+    strcpy(value, "25");
+    status = DICT_PUT(&table, key, value);
+    /* 输入和内部副本独立；写入成功或失败都由调用方释放输入。 */
+    config.free(key, config.ctx); key = NULL;
+    config.free(value, config.ctx); value = NULL;
     if (status != DICT_ADDED && status != DICT_REPLACED) goto done;
-    SDS_FREE(key, &strings); /* 输入仍归调用方；dict 已保存独立副本 */
-    c.free(temperature, c.ctx);
-    key = NULL;
-    temperature = NULL;
-    if (DICT_GET(&h, "temperature", &value)) {
-        int current = *(int *)value;
-        (void)current;
+    if (DICT_GET(&table, "temperature", &stored)) {
+        SDS_T result = (SDS_T)stored; /* 借用，不能自行释放或修改 */
+        size_t length = SDS_LEN(result);
+        (void)length;
     }
-    (void)DICT_REMOVE(&h, "temperature"); /* 释放 dict 内的 key/value 副本 */
+    (void)DICT_REMOVE(&table, "temperature"); /* 释放内部两个 SDS 和节点 */
 done:
-    SDS_FREE(key, &strings); /* 失败时调用方释放；成功时为 NULL */
-    c.free(temperature, c.ctx);
-    (void)DICT_DESTROY(&h);
+    config.free(key, config.ctx);
+    config.free(value, config.ctx);
+    (void)DICT_DESTROY(&table);
 }
 ```
 
-本例的 key 使用 sds，value 为动态分配的 int；都由自定义 allocator 分配，
-写入时复制 key/value，输入在成功或失败后都由调用方释放。
-删除、替换、清空或销毁 dict 时，析构回调释放 dict 内部的副本。ESP-IDF 示例使用同样的所有权处理，适配
-`heap_caps_malloc/heap_caps_free`。这些用户对象不计入 dict 内部节点/桶的全局统计。
-如果不配置析构回调，默认不释放 key/value，调用方保证对象在条目存活期间有效。
-key 的哈希和比较结果必须保持不变。字符串辅助函数需要非 NULL、
-以 NUL 结尾的字符串；通用接口是否允许 NULL key 由回调决定。
-value 可以为 NULL，`get` 用返回值区分“找到 NULL”和“没找到”。
+## SDS key/value 写入
+
+`DICT_PUT_SDS` 的两个输入都必须为本库创建的 SDS，按长度头复制；
+不能传普通 malloc 字符串或字面量，否则会访问不存在的长度头。
+value 可以为 NULL，两种接口都支持；key 必须非 NULL。
+
+```c
+SDS_ALLOCATOR_T allocator = {config.alloc, config.free, config.ctx};
+SDS_T key = SDS_NEW("temperature", &allocator);
+SDS_T value = SDS_NEW("25", &allocator);
+if (key && value) {
+    DICT_STATUS_T status = DICT_PUT_SDS(&table, key, value);
+    (void)status;
+}
+SDS_FREE(key, &allocator);
+SDS_FREE(value, &allocator);
+/* table 的内部副本在 REMOVE/CLEAR/DESTROY 时自动释放。 */
+```
+
+两种接口都用 dict 的 alloc/free/ctx 管理内部 SDS，可在同一表交替写入。
+`DICT_PUT` 遇到第一个 NUL 结束；`DICT_PUT_SDS` 保留内部 NUL 和后续字节。
+默认哈希/比较仍按 C 字符串处理，含内部 NUL 的 key 必须改用按 SDS 长度
+计算的 hash/equal；这时 GET/REMOVE/TAKE 查询 key 也必须是 SDS。
+内部 SDS 对象不计入节点/桶的诊断统计；包含它们的总量由共享分配器统计。
 
 ## 自定义 malloc/free
 
@@ -123,23 +121,20 @@ c.free = my_free;
 c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
 ```
 
-`alloc/free` 必须同时配置；省略时使用标准 `malloc/free`。它们管理节点
-和桶数组。配置成对的 `copy_key/copy_value` 和 `destroy_key/destroy_value`
-后，`DICT_PUT` 始终复制 key/value；输入始终归调用方。
-复制回调必须返回独立的堆对象，并保持 key 的哈希与比较结果。
-`DICT_PUT` 未配置复制回调时返回 `DICT_INVALID`。
-对外只保留一个写入宏 `DICT_PUT`，不再自动切换到借用或转移模式。
-通用 void* 接口无法推断对象大小，因此必须显式提供复制回调。分配器需提供普通 C 对象所需的对齐，
-失败返回 NULL。`ctx` 会传给全部回调。
-若 key/value 也由用户分配，可配置 `destroy_key/destroy_value` 回收它们。
-ESP-IDF 的 `heap_caps_malloc` 示例见 `examples/esp_idf.c`，表操作仍需外部串行化。
+`alloc/free` 必须同时配置；省略时使用标准 malloc/free。它们管理节点、
+桶数组及两种公共写入接口创建的 SDS 副本。分配器须正确对齐，失败返回 NULL。
+`ctx` 会传给分配器和 hash/equal。公共字符串写入不需要对象复制/析构回调；
+若配置 copy_key/copy_value/destroy_key/destroy_value，则公共写入返回 DICT_INVALID，
+避免混用对象释放约定。这些字段仅保留供内部通用引擎验证，应用不应使用。
+ESP-IDF 适配见 examples/esp_idf.c，表操作仍需外部串行化。
 
 ## SDS / dict / value 共用一个分配器
 
-完整可运行示例见 `examples/shared_allocator.c`。两张独立 dict 使用同一个
-`shared_malloc/shared_free` 和 `&global_memory`；SDS key 与 int value 也用
-同一组回调和 ctx。输入 k-v 在堆上创建，写入时复制，随后释放输入；
-dict 持有的两份独立副本在删除时释放。下面的 wiring 是示例的核心：
+完整可运行示例见 `examples/shared_allocator.c`。两张独立 dict 共用
+shared_malloc/shared_free、global_memory 和同一 ctx：第一张用堆上的普通 char*
+输入调用 DICT_PUT，第二张用堆上的 SDS 输入调用 DICT_PUT_SDS。
+函数 `put_char_example` 与 `put_sds_example` 分别展示两种调用方式。
+每次写入后立即释放输入，dict 内部的 key/value 副本均为 SDS。
 
 ```c
 SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, &global_memory};
@@ -147,15 +142,12 @@ DICT_CONFIG_T config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
 config.alloc = allocator.alloc;
 config.free = allocator.free;
 config.ctx = allocator.ctx;
-config.destroy_key = destroy_string; /* 用 SDS_FREE 还原字符串的起始地址 */
-config.destroy_value = shared_free;
-config.copy_key = copy_string;
-config.copy_value = copy_int;
+/* 不配置对象复制/析构回调；公共字符串接口自动处理。 */
 ```
 
 公共分配器在每个分配块前保存大小，返回保持对齐的用户指针；free 根据
 块头扣减统计并释放原始地址。因此它统计的不仅有 dict 节点/新旧桶数组，
-还有 SDS 长度头、内容、终止符，以及动态分配的 value。示例的 live_bytes
+还有 SDS 长度头、内容、终止符，以及 key/value 副本。示例的 live_bytes
 包含公共分配器自己的统计头，仍不包含底层 libc 的元数据和对齐开销。
 SDS_FREE 先跳回 SDS 的 int 头，再由 shared_free 跳回公共分配器的头。
 这两层起始地址不同，不能直接对 SDS 内容指针调用 shared_free。
@@ -175,8 +167,8 @@ make build/shared_allocator
 这是单线程示例；应用多个任务共用分配器时，计数和底层分配器必须同步。
 `DICT_ENABLE_MEMORY_STATS` 只控制库内节点/桶的诊断统计，不控制示例的自定义
 计数器；两组数据有重叠，不能相加，否则重复计数。判断包含 SDS/value 的
-总占用时使用公共分配器的数据。成功 put 后由析构回调释放 key/value，
-失败时由调用方释放；两张 dict 全部销毁才要求公共总量归零。
+总占用时使用公共分配器的数据。输入在成功或失败后都由调用方释放，
+内部副本由 dict 自动释放；两张 dict 全部销毁才要求公共总量归零。
 示例自己定义唯一统计对象并含 main，作为独立程序运行；集成回调时不要
 在多个文件重复定义 DICT_MEMORY_STATS_IMPLEMENTATION。
 
@@ -238,7 +230,7 @@ malloc 字符串或子串指针调用。不要直接 `free(s)`，也不要用普
 
 调用方的 sds 分配仍不计入 dict 节点/桶的全局计数；`sds_alloc_size` 是
 请求大小，不包含分配器元数据/对齐开销。析构字符串必须使用 sds_free，
-因此示例单独提供 string 析构回调，int value 则使用普通 allocator free。
+普通 char* 输入使用 allocator free，SDS 输入使用 SDS_FREE；dict 自动正确释放内部 SDS。
 
 ## 使用宏作为类型
 
@@ -388,9 +380,10 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 | API | 行为 |
 | --- | --- |
 | `DICT_INIT` | 初始化未初始化或已销毁对象；不分配内存 |
-| `DICT_PUT` | 始终复制 key/value；新增返回 `DICT_ADDED`，替换返回 `DICT_REPLACED`；失败回收部分副本，输入始终归调用方 |
+| `DICT_PUT` | 两个普通 char* 输入，按 strlen 复制为 SDS；新增 ADDED，替换 REPLACED |
+| `DICT_PUT_SDS` | 两个 SDS 输入，按长度头复制为 SDS；保留完整字节内容 |
 | `DICT_GET` | 找到返回 1，未找到返回 0；输出借用的 value |
-| `DICT_REMOVE` | 删除并调用配置的对象析构回调 |
+| `DICT_REMOVE` | 删除并自动释放内部 SDS key/value 副本 |
 | `DICT_TAKE` | 删除但不析构，将 key/value 所有权交给调用方 |
 | `DICT_RESERVE` | 请求桶容量；正在迁移且请求更大容量时返回 `DICT_BUSY` |
 | `DICT_REHASH_STEP` | 手动迁移，返回消耗的工作单元数 |
@@ -400,17 +393,15 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 | `DICT_CLEAR` | 释放全部存储，保留配置，可继续插入 |
 | `DICT_DESTROY` | 释放并清零；再次使用前需要 init |
 
-复制模式要求同时配置两个复制回调和两个析构回调，否则 init 返回 `DICT_INVALID`。
-写入成功后 dict 持有独立副本，输入始终由调用方释放；失败释放部分副本，
-已有条目不变。NULL value 直接保存 NULL，不调用 value 复制回调。
-公共写入宏没有借用/转移模式；未配置回调时写入返回 `DICT_INVALID`。
-替换释放旧副本，采用新的独立副本。
-不同所有权对象之间不得共享同一地址，尤其不要把同一个需要释放的对象
-同时作为 key/value。`take` 要求两个非 NULL 且不同的输出地址。
+两种写入接口都自动复制 key/value，输入始终归调用方；失败释放部分副本，
+已有条目不变。NULL value 直接保存 NULL。替换、REMOVE、CLEAR、DESTROY
+自动释放内部 SDS；GET 返回借用的 SDS 指针，不得自行释放或改变 key。
+TAKE 则把两个 SDS 副本交给调用方，调用方使用与 dict 相同的 allocator
+执行 SDS_FREE，而不是直接 free 内容指针。不同表可以使用不同分配器。
 
 初始化失败后不要调用其他操作；已初始化的表不要再次直接 init，也不要
 按值复制拥有动态内存的 `dict`。对象析构/分配/哈希/比较回调不得重入表操作。
-析构回调需要能够处理传入的 NULL value。
+公共字符串接口自动处理 NULL value，无需自定义析构。
 
 ## 渐进式 rehash 与运行时间
 
@@ -446,7 +437,8 @@ ctest --test-dir build-cmake --output-on-failure
 
 测试覆盖多编译单元链接、字符串/整数键、NULL value、复制模式与所有权转移、替换及删除/销毁释放、
 逐个注入分配失败、全碰撞长链、单节点迁移预算、遍历期间修改保护，
-以及 20 万次对照模型随机操作。
+以及 20 万次对照模型随机操作。新增普通 char*/SDS 两种 key-value 写入测试，
+覆盖参数单次求值、交替写入、二进制数据、OOM、全碰撞 rehash 和释放归零。
 
 `make test` 同时测试统计开/关、跨编译单元共享、默认/自定义分配器混用、
 OOM 回滚、rehash 两张桶表的统计和清理后归零；另用四个 pthread 任务操作

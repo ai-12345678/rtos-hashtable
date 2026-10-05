@@ -134,7 +134,25 @@ ESP-IDF 适配见 examples/esp_idf.c，表操作仍需外部串行化。
 shared_malloc/shared_free、global_memory 和同一 ctx：第一张用堆上的普通 char*
 输入调用 DICT_PUT，第二张用堆上的 SDS 输入调用 DICT_PUT_SDS。
 函数 `put_char_example` 与 `put_sds_example` 分别展示两种调用方式。
-每次写入后立即释放输入，dict 内部的 key/value 副本均为 SDS。
+这两个堆输入示例每次写入后立即释放输入，dict 内部的 key/value 副本均为 SDS。
+另提供 `put_char_array_example`，展示 key/value 都为局部 char 数组：
+
+```c
+char key[] = "mode";
+char value[] = "auto";
+DICT_STATUS_T status = DICT_PUT(&table, key, value);
+/* 成功时已经保存独立副本；key/value 无需 free。 */
+```
+
+示例在写入后修改两个数组，并在函数返回后再次查询，验证内部副本仍为
+mode/auto。局部数组不能传给 shared_free 或 SDS_FREE；dict 只释放自己的副本。
+
+`put_get_int64_example` 演示 int64_t 写入/读取：用 snprintf 和 PRId64
+把整数编码为十进制 char[]，经 DICT_PUT 保存；GET 后用 strtoimax
+解析，检查 ERANGE、完整字符串消费和 INT64_MIN/MAX 范围，再转回 int64_t。
+示例验证 INT64_MIN 和 INT64_MAX；不经过浮点数或 32 位 int。
+这里保存的是整数的字符串表示，不能对取出的字符串直接强转 int64_t* 读取。
+
 
 ```c
 SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, &global_memory};

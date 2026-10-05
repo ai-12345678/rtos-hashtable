@@ -9,6 +9,8 @@
 #include "sds.h"
 #include <assert.h>
 #include <stdio.h>
+#include <inttypes.h>
+#include <errno.h>
 
 typedef struct memory_tracker {
     size_t live_bytes, live_blocks, peak_bytes;
@@ -78,11 +80,47 @@ static int put_sds_example(DICT_T *d, memory_tracker *t) {
     SDS_FREE(value, &allocator);
     return status == DICT_ADDED || status == DICT_REPLACED;
 }
+/* Example 3: local char[] key AND value. DICT_PUT copies before returning. */
+static int put_char_array_example(DICT_T *d) {
+    char key[] = "mode";
+    char value[] = "auto";
+    void *stored;
+    DICT_STATUS_T status = DICT_PUT(d, key, value);
+    if (status != DICT_ADDED && status != DICT_REPLACED) return 0;
+    /* These arrays are caller-owned locals: never pass them to shared_free.
+     * Changing them or returning from this function cannot invalidate copies. */
+    key[0] = 'X';
+    value[0] = 'X';
+    return DICT_GET(d, "mode", &stored) && strcmp((const char *)stored, "auto") == 0;
+}
+/* Example 4: int64_t round-trip through the string API. Decimal encoding
+ * preserves all 64 bits (no floating point or 32-bit int conversion). */
+static int put_get_int64_example(DICT_T *d, int64_t input, int64_t *output) {
+    char key[] = "counter64";
+    char value[32]; /* sign + 19 digits + terminator */
+    char *end;
+    void *stored;
+    int length;
+    intmax_t parsed;
+    DICT_STATUS_T status;
+    length = snprintf(value, sizeof(value), "%" PRId64, input);
+    if (length < 0 || (size_t)length >= sizeof(value)) return 0;
+    status = DICT_PUT(d, key, value);
+    if (status != DICT_ADDED && status != DICT_REPLACED) return 0;
+    if (!DICT_GET(d, key, &stored) || !stored) return 0;
+    errno = 0;
+    parsed = strtoimax((const char *)stored, &end, 10);
+    if (errno == ERANGE || end == (char *)stored || *end != '\0' ||
+        parsed < INT64_MIN || parsed > INT64_MAX) return 0;
+    *output = (int64_t)parsed;
+    return *output == input;
+}
 static int run_demo(size_t fail_at, int verbose) {
     DICT_T first, second;
     DICT_CONFIG_T config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
     int first_ready = 0, second_ready = 0, ok = 0;
     void *value;
+    int64_t read_back;
     if (global_memory.live_bytes || global_memory.live_blocks) return 0;
     memset(&global_memory, 0, sizeof(global_memory));
     global_memory.fail_at = fail_at;
@@ -95,9 +133,15 @@ static int run_demo(size_t fail_at, int verbose) {
     second_ready = 1;
     if (DICT_RESERVE(&first, 4) != DICT_OK || DICT_RESERVE(&second, 4) != DICT_OK) goto done;
     if (!put_char_example(&first, &global_memory) ||
-        !put_sds_example(&second, &global_memory)) goto done;
+        !put_sds_example(&second, &global_memory) ||
+        !put_char_array_example(&first) ||
+        !put_get_int64_example(&first, INT64_MIN, &read_back) ||
+        !put_get_int64_example(&first, INT64_MAX, &read_back)) goto done;
+    if (verbose) printf("int64 round-trip: %" PRId64 " (min/max checked)\n", read_back);
     if (!DICT_GET(&first, "temperature", &value) || strcmp((const char *)value, "25") != 0) goto done;
     if (!DICT_GET(&second, "humidity", &value) || strcmp((const char *)value, "60") != 0) goto done;
+    /* The char[] helper has returned; its local arrays no longer exist. */
+    if (!DICT_GET(&first, "mode", &value) || strcmp((const char *)value, "auto") != 0) goto done;
     if (verbose)
         printf("Two dicts + SDS keys + values: %zu bytes / %zu blocks\n",
                global_memory.live_bytes, global_memory.live_blocks);

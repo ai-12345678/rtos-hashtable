@@ -516,7 +516,7 @@ static inline int RTOS_SYMBOL(dict_equal_string_impl)(const void *a, const void 
 #define DICT_GET(table, key, out_value) \
     (RTOS_SYMBOL(dict_get_impl)((table), (key), (out_value)))
 /* The sole public insertion macro always copies; input ownership never moves. */
-#define Dict_put(table, key, value) \
+#define DICT_PUT(table, key, value) \
     (RTOS_SYMBOL(dict_put_copy_impl)((table), (key), (value)))
 #define DICT_REMOVE(table, key) \
     (RTOS_SYMBOL(dict_remove_impl)((table), (key)))

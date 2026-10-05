@@ -61,7 +61,7 @@ void app_main(void) {
         goto done;
     }
     *temperature = 25;
-    status = Dict_put(&sensors, key, temperature);
+    status = DICT_PUT(&sensors, key, temperature);
     if (status != DICT_ADDED && status != DICT_REPLACED) goto done;
     /* Dict owns independent heap copies; release both input objects now. */
     SDS_FREE(key, &strings);

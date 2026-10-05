@@ -1,5 +1,5 @@
 /* Internal engine tests exercise borrowed/owned insertion directly.
- * Public callers use Dict_put (copy-only); see test_dict_copy.c. */
+ * Public callers use DICT_PUT (copy-only); see test_dict_copy.c. */
 #include "dict.h"
 #include <assert.h>
 #include <stdio.h>

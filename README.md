@@ -6,7 +6,7 @@
 
 纯 C99，无外部依赖，无内置锁。复制 `include/dict.h` 和 `include/rtos_namespace.h`，所有函数均为
 `static inline`，可在多个 C 编译单元中包含，不需要单独编译库。
-对外通过 `Dict_put` 和其他 `DICT_*` 宏调用，具体实现使用 `dict_*_impl` 内联函数。
+对外通过 `DICT_PUT` 和其他 `DICT_*` 宏调用，具体实现使用 `dict_*_impl` 内联函数。
 
 参考 Redis dict 的链式冲突处理和双表渐进式 rehash，自行实现，并非移植
 Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象复制和释放回调。
@@ -77,7 +77,7 @@ void example(void) {
     temperature = (int *)c.alloc(sizeof(*temperature), c.ctx);
     if (!key || !temperature) goto done;
     *temperature = 25;
-    status = Dict_put(&h, key, temperature);
+    status = DICT_PUT(&h, key, temperature);
     if (status != DICT_ADDED && status != DICT_REPLACED) goto done;
     SDS_FREE(key, &strings); /* 输入仍归调用方；dict 已保存独立副本 */
     c.free(temperature, c.ctx);
@@ -125,10 +125,10 @@ c.ctx = NULL; /* 可用于传递内存池或应用上下文 */
 
 `alloc/free` 必须同时配置；省略时使用标准 `malloc/free`。它们管理节点
 和桶数组。配置成对的 `copy_key/copy_value` 和 `destroy_key/destroy_value`
-后，`Dict_put` 始终复制 key/value；输入始终归调用方。
+后，`DICT_PUT` 始终复制 key/value；输入始终归调用方。
 复制回调必须返回独立的堆对象，并保持 key 的哈希与比较结果。
-`Dict_put` 未配置复制回调时返回 `DICT_INVALID`。
-对外只保留一个写入宏 `Dict_put`，不再自动切换到借用或转移模式。
+`DICT_PUT` 未配置复制回调时返回 `DICT_INVALID`。
+对外只保留一个写入宏 `DICT_PUT`，不再自动切换到借用或转移模式。
 通用 void* 接口无法推断对象大小，因此必须显式提供复制回调。分配器需提供普通 C 对象所需的对齐，
 失败返回 NULL。`ctx` 会传给全部回调。
 若 key/value 也由用户分配，可配置 `destroy_key/destroy_value` 回收它们。
@@ -367,7 +367,7 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 
 ## 宏接口
 
-所有操作统一通过 `DICT_INIT`、`Dict_put`、`DICT_GET` 等宏调用，宏只转发到
+所有操作统一通过 `DICT_INIT`、`DICT_PUT`、`DICT_GET` 等宏调用，宏只转发到
 类型明确的 `static inline` 实现。每个参数在展开式中仅出现一次，允许使用
 `ptr++` 等带副作用的表达式；不同参数之间的求值顺序仍遵循 C 函数调用规则，
 不要在不同参数中同时修改同一个变量。返回值和原有 API 保持一致。
@@ -380,7 +380,7 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 数据结构的内部字段不作为稳定接口，应用应使用公开宏。
 宏包装不增加运行时分配，也不改变节点或字典对象的内存布局。
 
-统一使用 `include/dict.h`、`DICT_T`、`DICT_CONFIG_T`、`Dict_put` 和其他 `DICT_*`。
+统一使用 `include/dict.h`、`DICT_T`、`DICT_CONFIG_T`、`DICT_PUT` 和其他 `DICT_*`。
 项目级统计开关、实现定义和锁钩子也统一使用 `DICT_*` 名称。
 
 ## API 与所有权
@@ -388,7 +388,7 @@ ESP-IDF 示例的 `examples/esp_idf_dict_config.h` 使用共享 `portMUX_TYPE`�
 | API | 行为 |
 | --- | --- |
 | `DICT_INIT` | 初始化未初始化或已销毁对象；不分配内存 |
-| `Dict_put` | 始终复制 key/value；新增返回 `DICT_ADDED`，替换返回 `DICT_REPLACED`；失败回收部分副本，输入始终归调用方 |
+| `DICT_PUT` | 始终复制 key/value；新增返回 `DICT_ADDED`，替换返回 `DICT_REPLACED`；失败回收部分副本，输入始终归调用方 |
 | `DICT_GET` | 找到返回 1，未找到返回 0；输出借用的 value |
 | `DICT_REMOVE` | 删除并调用配置的对象析构回调 |
 | `DICT_TAKE` | 删除但不析构，将 key/value 所有权交给调用方 |

@@ -1,4 +1,4 @@
-/* Host demo: SDS keys, int values and TWO dictionaries share one allocator/ctx.
+/* Host demo: SDS key/value copies and TWO dictionaries share one allocator/ctx.
  * Single-threaded: protect shared accounting separately if used by many tasks.
  * Run with --test to fail every allocation point and check cleanup.
  * DICT's internal counters overlap this allocator's counters; do not add them.
@@ -16,7 +16,7 @@ typedef struct memory_tracker {
 } memory_tracker;
 static memory_tracker global_memory;
 
-/* C99 alignment for this example's ordinary objects (dict/SDS/int). The header
+/* C99 alignment for this example's ordinary objects (dict/SDS/char). The header
  * records sizes because a free callback receives only ptr and ctx. */
 typedef union allocation_header {
     size_t total_bytes;
@@ -51,40 +51,32 @@ static void shared_free(void *ptr, void *ctx) {
     --t->live_blocks;
     free(header);
 }
-static void destroy_string(void *ptr, void *ctx) {
-    SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, ctx};
-    /* SDS_FREE first recovers the SDS allocation base; shared_free then
-     * recovers its own header. Never shared_free the SDS content pointer. */
-    SDS_FREE((SDS_T)ptr, &allocator);
-}
-static void *copy_string(const void *ptr, void *ctx) {
-    SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, ctx};
-    return SDS_DUP((const char *)ptr, &allocator);
-}
-static void *copy_int(const void *ptr, void *ctx) {
-    int *copy = (int *)shared_malloc(sizeof(*copy), ctx);
-    if (copy) *copy = *(const int *)ptr;
-    return copy;
-}
-static int put_copied(DICT_T *d, const char *text, int number, memory_tracker *t) {
-    SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, t};
-    SDS_T key = SDS_NEW(text, &allocator);
-    int *value = (int *)shared_malloc(sizeof(*value), t);
-    DICT_STATUS_T status;
-    if (!key || !value) {
-        SDS_FREE(key, &allocator);
-        shared_free(value, t);
-        return 0;
+/* Example 1: heap-allocated ordinary char* key AND value. No SDS header. */
+static int put_char_example(DICT_T *d, memory_tracker *t) {
+    char *key = (char *)shared_malloc(sizeof("temperature"), t);
+    char *value = (char *)shared_malloc(sizeof("25"), t);
+    DICT_STATUS_T status = DICT_OOM;
+    if (key && value) {
+        strcpy(key, "temperature");
+        strcpy(value, "25");
+        status = DICT_PUT(d, key, value);
     }
-    *value = number;
-    status = DICT_PUT(d, key, value);
-    /* Source objects always stay caller-owned; dict owns only the copies. */
-    SDS_FREE(key, &allocator);
+    /* Dict stores independent SDS copies. Always free caller inputs. */
+    shared_free(key, t);
     shared_free(value, t);
-    if (status != DICT_ADDED && status != DICT_REPLACED) {
-        return 0;
-    }
-    return 1;
+    return status == DICT_ADDED || status == DICT_REPLACED;
+}
+/* Example 2: heap-allocated SDS key AND value, with int length headers. */
+static int put_sds_example(DICT_T *d, memory_tracker *t) {
+    SDS_ALLOCATOR_T allocator = {shared_malloc, shared_free, t};
+    SDS_T key = SDS_NEW("humidity", &allocator);
+    SDS_T value = SDS_NEW("60", &allocator);
+    DICT_STATUS_T status = DICT_OOM;
+    if (key && value) status = DICT_PUT_SDS(d, key, value);
+    /* Never shared_free an SDS content pointer; SDS_FREE recovers its base. */
+    SDS_FREE(key, &allocator);
+    SDS_FREE(value, &allocator);
+    return status == DICT_ADDED || status == DICT_REPLACED;
 }
 static int run_demo(size_t fail_at, int verbose) {
     DICT_T first, second;
@@ -96,19 +88,16 @@ static int run_demo(size_t fail_at, int verbose) {
     global_memory.fail_at = fail_at;
     config.alloc = shared_malloc;
     config.free = shared_free;
-    config.ctx = &global_memory; /* Same ctx as the SDS allocator and int value. */
-    config.destroy_key = destroy_string;
-    config.destroy_value = shared_free;
-    config.copy_key = copy_string;
-    config.copy_value = copy_int;
+    config.ctx = &global_memory; /* Same ctx for input strings and internal SDS copies. */
     if (DICT_INIT(&first, &config) != DICT_OK) goto done;
     first_ready = 1;
     if (DICT_INIT(&second, &config) != DICT_OK) goto done;
     second_ready = 1;
     if (DICT_RESERVE(&first, 4) != DICT_OK || DICT_RESERVE(&second, 4) != DICT_OK) goto done;
-    if (!put_copied(&first, "temperature", 25, &global_memory) ||
-        !put_copied(&second, "humidity", 60, &global_memory)) goto done;
-    if (!DICT_GET(&first, "temperature", &value) || *(int *)value != 25) goto done;
+    if (!put_char_example(&first, &global_memory) ||
+        !put_sds_example(&second, &global_memory)) goto done;
+    if (!DICT_GET(&first, "temperature", &value) || strcmp((const char *)value, "25") != 0) goto done;
+    if (!DICT_GET(&second, "humidity", &value) || strcmp((const char *)value, "60") != 0) goto done;
     if (verbose)
         printf("Two dicts + SDS keys + values: %zu bytes / %zu blocks\n",
                global_memory.live_bytes, global_memory.live_blocks);

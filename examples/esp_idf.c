@@ -23,23 +23,41 @@ static void idf_free(void *ptr, void *ctx) {
 void app_main(void) {
     dict sensors;
     dict_config config = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
-    char key[] = "temperature";
-    int temperature = 25;
+    char *key = NULL;
+    int *temperature = NULL;
     void *value = NULL;
     dict_status status;
     config.alloc = idf_malloc;
     config.free = idf_free;
-    /* Borrowed key/value; they must outlive their entries. */
+    config.destroy_key = idf_free;
+    config.destroy_value = idf_free;
     status = DICT_INIT(&sensors, &config);
     if (status != DICT_OK) return;
     /* Preallocate buckets. Nodes still use the custom allocator per insert. */
     status = DICT_RESERVE(&sensors, 16);
     if (status != DICT_OK) goto done;
-    status = DICT_PUT(&sensors, key, &temperature);
-    if (status != DICT_ADDED) goto done;
+    /* User objects use the same custom allocator and ctx as internal storage.
+     * They remain caller-owned until put succeeds. */
+    key = (char *)config.alloc(sizeof("temperature"), config.ctx);
+    temperature = (int *)config.alloc(sizeof(*temperature), config.ctx);
+    if (!key || !temperature) {
+        status = DICT_OOM;
+        goto done;
+    }
+    memcpy(key, "temperature", sizeof("temperature"));
+    *temperature = 25;
+    status = DICT_PUT(&sensors, key, temperature);
+    if (status != DICT_ADDED && status != DICT_REPLACED) goto done;
+    /* The dict's destructor callbacks now own both objects. */
+    key = NULL;
+    temperature = NULL;
     if (DICT_GET(&sensors, "temperature", &value))
         ESP_LOGI("dict", "temperature=%d", *(int *)value);
 done:
+    /* NULL after successful transfer; otherwise release caller-owned objects,
+     * including partial allocation or insertion failures. */
+    config.free(key, config.ctx);
+    config.free(temperature, config.ctx);
     if (status < 0) ESP_LOGE("dict", "Operation failed: %d", (int)status);
     status = DICT_DESTROY(&sensors);
     if (status == DICT_OK) {

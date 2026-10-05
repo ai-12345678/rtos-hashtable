@@ -33,25 +33,53 @@ Redis 源码。支持自定义 malloc/free、键哈希/比较、可选对象释�
 ```c
 #include "dict.h"
 
+static void *example_malloc(size_t bytes, void *ctx) {
+    (void)ctx;
+    return malloc(bytes);
+}
+static void example_free(void *ptr, void *ctx) {
+    (void)ctx;
+    free(ptr);
+}
+
 void example(void) {
     dict h;
     dict_config c = DICT_CONFIG_DEFAULT(DICT_HASH_STRING, DICT_EQUAL_STRING);
-    char key[] = "temperature";
-    int temperature = 25;
+    char *key = NULL;
+    int *temperature = NULL;
     void *value;
+    dict_status status;
+
+    c.alloc = example_malloc;
+    c.free = example_free;
+    c.destroy_key = example_free;
+    c.destroy_value = example_free;
 
     if (DICT_INIT(&h, &c) != DICT_OK) return;
-    if (DICT_PUT(&h, key, &temperature) == DICT_ADDED) {
-        if (DICT_GET(&h, "temperature", &value)) {
-            int current = *(int *)value;
-            (void)current;
-        }
+    key = (char *)c.alloc(sizeof("temperature"), c.ctx);
+    temperature = (int *)c.alloc(sizeof(*temperature), c.ctx);
+    if (!key || !temperature) goto done;
+    memcpy(key, "temperature", sizeof("temperature"));
+    *temperature = 25;
+    status = DICT_PUT(&h, key, temperature);
+    if (status != DICT_ADDED && status != DICT_REPLACED) goto done;
+    key = NULL; /* 成功后交由 dict 的析构回调释放 */
+    temperature = NULL;
+    if (DICT_GET(&h, "temperature", &value)) {
+        int current = *(int *)value;
+        (void)current;
     }
-    DICT_DESTROY(&h);
+done:
+    c.free(key, c.ctx); /* 失败时调用方释放；成功时为 NULL */
+    c.free(temperature, c.ctx);
+    (void)DICT_DESTROY(&h);
 }
 ```
 
-默认不释放 key/value，调用方保证对象在条目存活期间有效。
+本例的 key/value 也由自定义 allocator 分配，成功 put 后由析构回调释放，
+失败时仍由调用方释放。ESP-IDF 示例使用同样的所有权处理，适配
+`heap_caps_malloc/heap_caps_free`。这些用户对象不计入 dict 内部节点/桶的全局统计。
+如果不配置析构回调，默认不释放 key/value，调用方保证对象在条目存活期间有效。
 key 的哈希和比较结果必须保持不变。字符串辅助函数需要非 NULL、
 以 NUL 结尾的字符串；通用接口是否允许 NULL key 由回调决定。
 value 可以为 NULL，`get` 用返回值区分“找到 NULL”和“没找到”。
